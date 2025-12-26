@@ -902,7 +902,9 @@ static bool should_send_initiation(struct wireguard_peer *peer) {
     bool result = false;
     
     if (wireguardif_can_send_initiation(peer)) {
+		#ifdef DEBUG_DEEP
         log_i(TAG "  can_send_initiation: TRUE");
+		#endif
         if (peer->send_handshake) {
             log_i(TAG "  send_handshake flag is TRUE");
             result = true;
@@ -915,7 +917,10 @@ static bool should_send_initiation(struct wireguard_peer *peer) {
             result = true;
         }
     } else {
-        log_i(TAG "  can_send_initiation: FALSE");
+
+		#ifdef DEBUG_DEEP
+		log_i(TAG "  can_send_initiation: FALSE");
+		#endif
     }
     
     return result;
@@ -953,13 +958,17 @@ static bool should_reset_peer(struct wireguard_peer *peer) {
 }
 
 static void wireguardif_tmr(void *arg) {
-	log_i(TAG "=== TIMER START (%dms interval) ===", WIREGUARDIF_TIMER_MSECS);
+	#ifdef DEBUG_DEEP
+	log_i(TAG "=== TIMER START (%dms intervalm timestamp: %ld) ===", WIREGUARDIF_TIMER_MSECS, millis());
+	#endif
 
 	struct wireguard_device *device = (struct wireguard_device *)arg;
 	struct wireguard_peer *peer;
 	int x;
 
+	#ifdef DEBUG_DEEP
 	log_i(TAG "Device valid: %d", device->valid);
+	#endif
 
 	// Reschedule this timer
 	sys_timeout(WIREGUARDIF_TIMER_MSECS, wireguardif_tmr, device);
@@ -968,16 +977,22 @@ static void wireguardif_tmr(void *arg) {
 	bool link_up = false;
 	for (x=0; x < WIREGUARD_MAX_PEERS; x++) {
 		peer = &device->peers[x];
+		#ifdef DEBUG_DEEP
 		log_i(TAG "Peer[%d]: valid=%d, active=%d, send_handshake=%d", 
               x, peer->valid, peer->active, peer->send_handshake);		
+		#endif
 
 		if (peer->valid) {
+			#ifdef DEBUG_DEEP
 			log_i(TAG "  curr_keypair.valid=%d, last_tx=%u, last_rx=%u",
-                  peer->curr_keypair.valid, peer->last_tx, peer->last_rx);			
+                  peer->curr_keypair.valid, peer->last_tx, peer->last_rx);
+			#endif
 
 			// Sprawdź czy powinien wysłać handshake
 			bool should_send = should_send_initiation(peer);
+			#ifdef DEBUG_DEEP
 			log_i(TAG "  should_send_initiation=%d", should_send);
+			#endif
 			
 			if (should_send) {
 					log_i(TAG "  TRYING TO SEND HANDSHAKE...");
@@ -1017,7 +1032,9 @@ static void wireguardif_tmr(void *arg) {
 		netif_set_link_down(device->netif);
 	}
 
+	#ifdef DEBUG_DEEP
 	log_i(TAG "=== TIMER END ===");
+	#endif
 }
 
 void wireguardif_shutdown(struct netif *netif) {

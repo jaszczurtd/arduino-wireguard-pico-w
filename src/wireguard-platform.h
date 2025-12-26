@@ -47,6 +47,8 @@
 extern "C" {
 #endif
 
+//#define DEBUG_DEEP
+
 // Peers are allocated statically inside the device structure to avoid malloc
 #define WIREGUARD_MAX_PEERS 1
 #define WIREGUARD_MAX_SRC_IPS 2
