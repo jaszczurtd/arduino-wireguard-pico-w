@@ -1,6 +1,7 @@
 /*
- * WireGuard implementation for ESP32 Arduino by Kenta Ida (fuga@fugafuga.org)
+ * Based on WireGuard implementation for ESP32 Arduino by Kenta Ida (fuga@fugafuga.org)
  * SPDX-License-Identifier: BSD-3-Clause
+ * Arduino / Pico W port: Marcin Kielesiński
  */
 #pragma once
 
@@ -26,7 +27,6 @@ public:
     /*
      * Configurable API:
      * - allowedIp/allowedMask: what should be routed via WireGuard (e.g. 10.8.0.0/24)
-     * - localListenPort: UDP source port to bind on the client (0 => use remotePeerPort)
      */
     bool beginAdvanced(const IPAddress& localIP,
                        const char* privateKey,
@@ -34,8 +34,7 @@ public:
                        const char* remotePeerPublicKey,
                        uint16_t remotePeerPort,
                        const IPAddress& allowedIp,
-                       const IPAddress& allowedMask,
-                       uint16_t localListenPort = 0);
+                       const IPAddress& allowedMask);
 
     void end();
 

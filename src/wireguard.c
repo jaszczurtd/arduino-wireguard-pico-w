@@ -40,6 +40,7 @@
 #include <string.h>
 
 #include "crypto.h"
+#include "wg_port_pico.h"
 
 // For HMAC calculation
 #define WIREGUARD_BLAKE2S_BLOCK_SIZE (64)
@@ -571,6 +572,8 @@ struct wireguard_peer *wireguard_process_initiation_message(struct wireguard_dev
 	uint32_t now;
 	bool rate_limit;
 	bool replay;
+
+	log_i(TAG "Processing initiation message from peer...");
 
 	// We are the responder, other end is the initiator
 

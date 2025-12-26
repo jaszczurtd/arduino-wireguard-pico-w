@@ -41,6 +41,28 @@
 #include <stdint.h>
 #include "../../crypto.h"
 
+#ifndef U32V
+#define U32V(v) ((uint32_t)(v) & 0xFFFFFFFFU)
+#endif
+
+#ifndef U8TO32_LITTLE
+#define U8TO32_LITTLE(p) \
+    (((uint32_t)((p)[0])      ) | \
+     ((uint32_t)((p)[1]) <<  8) | \
+     ((uint32_t)((p)[2]) << 16) | \
+     ((uint32_t)((p)[3]) << 24))
+#endif
+
+#ifndef U32TO8_LITTLE
+#define U32TO8_LITTLE(p, v) \
+    do { \
+        (p)[0] = (uint8_t)((v)      ); \
+        (p)[1] = (uint8_t)((v) >>  8); \
+        (p)[2] = (uint8_t)((v) >> 16); \
+        (p)[3] = (uint8_t)((v) >> 24); \
+    } while (0)
+#endif
+
 // 2.3.  The ChaCha20 Block Function
 // The first four words (0-3) are constants: 0x61707865, 0x3320646e, 0x79622d32, 0x6b206574
 static const uint32_t CHACHA20_CONSTANT_1 = 0x61707865;

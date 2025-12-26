@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include "WireGuard-ESP32.h"
+#include "arduino-wireguard-pico-w.h"
 
 #include <WiFi.h>
 
@@ -51,9 +51,8 @@ bool WireGuard::begin(const IPAddress &localIP,
     // Historical behavior: route everything via WireGuard.
     const IPAddress allowedIP(0, 0, 0, 0);
     const IPAddress allowedMask(0, 0, 0, 0);
-    const uint16_t listenPort = remotePeerPort;
     return beginAdvanced(localIP, privateKey, remotePeerAddress, remotePeerPublicKey,
-                         remotePeerPort, allowedIP, allowedMask, listenPort);
+                         remotePeerPort, allowedIP, allowedMask);
 }
 
 bool WireGuard::beginAdvanced(const IPAddress &localIP,
@@ -62,8 +61,7 @@ bool WireGuard::beginAdvanced(const IPAddress &localIP,
                              const char *remotePeerPublicKey,
                              uint16_t remotePeerPort,
                              const IPAddress &allowedIP,
-                             const IPAddress &allowedMask,
-                             uint16_t localListenPort) {
+                             const IPAddress &allowedMask) {
     if (_is_initialized) {
         return true;
     }
@@ -71,8 +69,12 @@ bool WireGuard::beginAdvanced(const IPAddress &localIP,
         return false;
     }
 
+    log_d(TAG "initial parameters OK");
+
     // Initialize platform glue (timers, RNG, etc.).
     wireguard_platform_init();
+
+    log_d(TAG "wireguard_platform_init OK");
 
     // Resolve endpoint.
     ip4_addr_t endpoint4;
@@ -106,23 +108,35 @@ bool WireGuard::beginAdvanced(const IPAddress &localIP,
     wg_netif->name[0] = 'w';
     wg_netif->name[1] = 'g';
 
+    log_d(TAG "netif start");
+
+    struct wireguardif_init_data wg_init;
+    wg_init.private_key = privateKey;
+    wg_init.listen_port = 0;
+
+    log_i(TAG "Previous default netif: %p", previous_default_netif);
+    log_i(TAG "WiFi STA netif: %p", tcpip_adapter_get_netif(TCPIP_ADAPTER_IF_STA));
+
+    // Jeśli underlying_netif jest NULL, użyj poprzedniego:
+    if (previous_default_netif == NULL) {
+        log_e(TAG "No default netif!");
+        return false;
+    }
+    wg_init.bind_netif = previous_default_netif;
+
     // Important: netif_add expects ip4_addr_t* in this Arduino-Pico (LWIP_IPV6=0) build.
     if (netif_add(wg_netif,
                   &ipaddr,
                   &netmask,
                   &gateway,
-                  nullptr,
+                  &wg_init,
                   &wireguardif_init,
                   &ip_input) == nullptr) {
         log_e(TAG "netif_add() failed");
         return false;
     }
 
-    // Add and configure peer.
-    struct wireguardif_init_data wg_init;
-    wg_init.private_key = privateKey;
-    wg_init.listen_port = (localListenPort != 0) ? localListenPort : remotePeerPort;
-    wg_init.bind_netif = previous_default_netif; // Ensure endpoint UDP uses Wi-Fi even if default route changes.
+    log_d(TAG "peer start");
 
     struct wireguardif_peer peer;
     memset(&peer, 0, sizeof(peer));
@@ -134,14 +148,19 @@ bool WireGuard::beginAdvanced(const IPAddress &localIP,
     peer.endpoint_ip = endpoint4;
     peer.endport_port = remotePeerPort;
 
-    if (!wireguardif_add_peer(wg_netif, &peer, &peer_index)) {
-        log_e(TAG "wireguardif_add_peer() failed");
+    err_t perr = wireguardif_add_peer(wg_netif, &peer, &peer_index);
+    if (perr != ERR_OK) {
+        log_e(TAG "wireguardif_add_peer() failed err=%d", (int)perr);
         return false;
     }
+
+    log_d(TAG "connecting...");
 
     // Bring up WireGuard.
     netif_set_up(wg_netif);
     wireguardif_connect(wg_netif, peer_index);
+
+    log_d(TAG "connected!...");
 
     // Route configuration.
     if (route_all) {

@@ -31,7 +31,7 @@ The original library targets ESP32 and depends on ESP-IDF pieces. For Pico W (Ar
 
 ```cpp
 #include <WiFi.h>
-#include <WireGuard-ESP32.h>
+#include "arduino-wireguard-pico-w.h"
 
 WireGuard wg;
 
@@ -50,11 +50,38 @@ static const IPAddress WG_LOCAL_IP(10, 8, 0, 50);
 static const IPAddress WG_LOCAL_GW(0, 0, 0, 0);
 static const IPAddress WG_LOCAL_MASK(255, 255, 255, 0);
 
-static const IPAddress WG_ENDPOINT_IP(203, 0, 113, 10);
+static const char* WG_ENDPOINT = "wireguard IP address";
 static const uint16_t  WG_ENDPOINT_PORT = 10000;
 
 static const IPAddress WG_ALLOWED_IP(0, 0, 0, 0);
 static const IPAddress WG_ALLOWED_MASK(0, 0, 0, 0);
+
+bool time_synchro(const char *tz, char *dest, int dest_size) {
+  if(tz != NULL) {
+    setenv("TZ", tz, 1);
+    tzset();
+  }
+
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  const time_t MIN_VALID_EPOCH = 1672531200; // 2023-01-01 00:00:00 UTC
+  time_t now = 0;
+
+  for (int i = 0; i < 30; i++) {   // 30 * 500ms = 15s
+    now = time(nullptr);
+    if (now >= MIN_VALID_EPOCH) break;
+    delay(500);
+  }
+
+  if (now < MIN_VALID_EPOCH) {
+    return false;
+  } else {
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+
+    strftime(dest, dest_size, "%Y-%m-%d %H:%M:%S", &tm_now);
+  }  
+  return true;
+}
 
 void setup() {
   Serial.begin(115200);
@@ -64,16 +91,28 @@ void setup() {
     delay(250);
   }
 
-  // beginAdvanced(local_ip, private_key, peer_public_key, preshared_key (optional),
-  //               endpoint_port, endpoint_ip, allowed_ip, allowed_mask)
-  wg.beginAdvanced(WG_LOCAL_IP,
-                   WG_PRIVATE_KEY,
-                   WG_PEER_PUBLIC_KEY,
-                   nullptr,                 // preshared key (optional)
-                   WG_ENDPOINT_PORT,
-                   WG_ENDPOINT_IP,
-                   WG_ALLOWED_IP,
-                   WG_ALLOWED_MASK);
+  //local time synchro
+  char buftime[32];
+  if(time_synchro("CET-1CEST,M3.5.0/2,M10.5.0/3", buftime, sizeof(buftime))) {
+    Serial.printf("time: %s\n", buftime);    
+  } else {
+    Serial.printf("NTP sync failed. check WiFi/DNS/UDP 123.\n");
+  }
+
+  if (!wg.beginAdvanced(
+        WG_LOCAL_IP,
+        WG_PRIVATE_KEY,
+        WG_ENDPOINT,
+        WG_SERVER_PUBLIC_KEY,
+        WG_ENDPOINT_PORT,
+        WG_ALLOWED_IP,
+        WG_ALLOWED_MASK
+      )) {
+    Serial.println("WireGuard initialization failed.");
+    while (true) {
+      delay(1000);
+    }
+  }
 
   // From this point the tunnel should attempt a handshake when traffic is sent.
 }

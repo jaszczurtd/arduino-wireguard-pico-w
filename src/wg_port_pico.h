@@ -11,6 +11,8 @@ struct wireguard_handshake;
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <string.h>
+#include <ctype.h>
 
 #include <Arduino.h>
 
@@ -23,14 +25,26 @@ struct wireguard_handshake;
 #define TAG "[WG] "
 #endif
 
-static inline void wg_logf_(const char *lvl, const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    printf("[%s] ", lvl);
-    vprintf(fmt, ap);
-    printf("\n");
-    va_end(ap);
-}
+#ifndef NOINIT
+#define NOINIT __attribute__((section(".noinit"))) 
+#endif
+
+#ifndef PRINTABLE_BUFFER_SIZE
+#define PRINTABLE_BUFFER_SIZE 512
+#endif
+
+NOINIT static char deb_buffer[PRINTABLE_BUFFER_SIZE];
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void dbg(const char *format, ...);
+void wg_logf_(const char *lvl, const char *fmt, ...);
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
 
 #ifndef log_v
 #define log_v(...) wg_logf_("V", __VA_ARGS__)
@@ -41,13 +55,15 @@ static inline void wg_logf_(const char *lvl, const char *fmt, ...) {
 #ifndef log_i
 #define log_i(...) wg_logf_("I", __VA_ARGS__)
 #endif
-#define ESP_LOGV(tag, fmt, ...) wg_logf_("V", "%s" fmt, tag, ##__VA_ARGS__)
 #ifndef log_w
 #define log_w(...) wg_logf_("W", __VA_ARGS__)
 #endif
 #ifndef log_e
 #define log_e(...) wg_logf_("E", __VA_ARGS__)
 #endif
+
+#define ESP_LOGV(tag, fmt, ...) wg_logf_("V", "%s: " fmt, tag, ##__VA_ARGS__)
+
 
 // ---- Minimal FreeRTOS compatibility (used by original code) ----
 #ifndef pdMS_TO_TICKS
