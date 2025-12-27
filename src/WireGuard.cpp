@@ -11,6 +11,8 @@
 #include <lwip/netif.h>
 #include <lwip/ip4_addr.h>
 #include <lwip/inet.h>
+#include <lwip/ip_addr.h>
+#include <lwip/ip4_addr.h>
 
 #include "wireguardif.h"
 #include "wireguard-platform.h"
@@ -195,3 +197,50 @@ void WireGuard::end() {
     peer_index = WIREGUARDIF_INVALID_INDEX;
 }
 
+bool WireGuard::peerUp(IPAddress* currentEndpointIp, uint16_t* currentEndpointPort) const {
+    if (!_is_initialized) return false;
+    if (wg_netif == nullptr || peer_index == WIREGUARDIF_INVALID_INDEX) return false;
+
+    ip_addr_t ep_ip;
+    u16_t ep_port = 0;
+
+    err_t rc = wireguardif_peer_is_up(
+        wg_netif,
+        peer_index,
+        (currentEndpointIp ? &ep_ip : nullptr),
+        (currentEndpointPort ? &ep_port : nullptr)
+    );
+    if (rc != ERR_OK) return false;
+
+    if (currentEndpointIp) {
+        if (IP_IS_V4(&ep_ip)) {
+            const ip4_addr_t* a = ip_2_ip4(&ep_ip);
+            *currentEndpointIp = IPAddress(ip4_addr1(a), ip4_addr2(a), ip4_addr3(a), ip4_addr4(a));
+        } else {
+            *currentEndpointIp = IPAddress(0, 0, 0, 0);
+        }
+    }
+    if (currentEndpointPort) *currentEndpointPort = (uint16_t)ep_port;
+
+    return true;
+}
+
+bool WireGuard::kickHandshake(const IPAddress& probeIp, uint16_t probePort, uint32_t minIntervalMs) {
+    if (!_is_initialized) return false;
+
+    const uint32_t now = millis();
+    if ((uint32_t)(now - _lastKickMs) < minIntervalMs) {
+        return true; // rate-limited: already kicked recently
+    }
+    _lastKickMs = now;
+
+    // Non-blocking trigger: one small UDP datagram to an AllowedIPs address.
+    WiFiUDP udp;
+    udp.begin(0); // ephemeral local port
+    udp.beginPacket(probeIp, probePort);
+    udp.write((uint8_t)0x00);
+    udp.endPacket();
+    udp.stop();
+
+    return true;
+}

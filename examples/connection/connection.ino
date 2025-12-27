@@ -122,9 +122,62 @@ void setup() {
   Serial.println("WireGuard initialized.");
 }
 
+//let's just assume that 10.8.0.1 is hosting some www page - we will try to read the html content here
+static const IPAddress TARGET_IP(10, 8, 0, 1);
+static const uint16_t  TARGET_PORT = 80;
+
+static void http_get_once() {
+  // 1) Ensure WG is ready WITHOUT blocking.
+  if (!wg.peerUp()) {
+    wg.kickHandshake(TARGET_IP, 9); // 9 = "discard" style port; no service required
+    Serial.println("WG not ready yet (no session key). Handshake kicked.");
+    return;
+  }
+
+  WiFiClient client;
+  client.setTimeout(5000);
+
+  Serial.printf("Connecting to %s:%u over WireGuard...\n",
+                TARGET_IP.toString().c_str(), TARGET_PORT);
+
+  // 2) Now connect happens only when session keys exist -> no handshake race here.
+  if (!client.connect(TARGET_IP, TARGET_PORT)) {
+    Serial.println("TCP connect failed (service/firewall/TCP-level issue).");
+    client.stop();
+    return;
+  }
+
+  client.print("GET / HTTP/1.1\r\n");
+  client.print("Host: 10.8.0.1\r\n");
+  client.print("Connection: close\r\n");
+  client.print("\r\n");
+
+  Serial.println("---- HTTP response begin ----");
+  while (client.connected() || client.available()) {
+    while (client.available()) {
+      Serial.write((uint8_t)client.read());
+    }
+    delay(10);
+  }
+  Serial.println("\n---- HTTP response end ----");
+
+  client.stop();
+}
+
+
 void loop() {
   watchdog_update();
   digitalWrite(LED_BUILTIN, (alertBlink = !alertBlink));
 
+  static uint32_t last = 0;
+  const uint32_t interval_ms = 5000;
+
+  if (millis() - last >= interval_ms) {
+    last = millis();
+    http_get_once();
+  }
+
   delay(UPDATE_INTERVAL_MS);
 }
+
+

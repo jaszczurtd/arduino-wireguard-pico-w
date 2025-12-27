@@ -11,6 +11,7 @@
 class WireGuard {
 private:
     bool _is_initialized = false;
+    uint32_t _lastKickMs = 0;
 
 public:
     /*
@@ -39,4 +40,14 @@ public:
     void end();
 
     bool is_initialized() const { return this->_is_initialized; }
+
+    /*
+     * Returns true when the peer has a valid session key (i.e., handshake completed at least once).
+     */
+    bool peerUp(IPAddress* currentEndpointIp = nullptr, uint16_t* currentEndpointPort = nullptr) const;
+
+    /*
+     * Sends a tiny UDP probe via WG to trigger handshake (non-blocking). Rate-limited.
+     */
+    bool kickHandshake(const IPAddress& probeIp, uint16_t probePort, uint32_t minIntervalMs = 250);
 };
