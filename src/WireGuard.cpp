@@ -18,6 +18,14 @@
 #include "wireguard-platform.h"
 #include "wg_port_pico.h"
 
+// wireguard.h has no extern "C" guard (unlike wireguardif.h), so its
+// declarations get C++ name-mangled unless wrapped here -- wireguard.c
+// itself is compiled as plain C, so the linker would otherwise look for a
+// mangled symbol that only ever exists unmangled.
+extern "C" {
+#include "wireguard.h"  // wireguard_base64_decode(), WIREGUARD_SESSION_KEY_LEN
+}
+
 // ---- Globals kept for backward-compat with the original library API ----
 static struct netif wg_netif_instance;
 static struct netif *wg_netif = &wg_netif_instance;
@@ -49,12 +57,13 @@ bool WireGuard::begin(const IPAddress &localIP,
                      const char *privateKey,
                      const char *remotePeerAddress,
                      const char *remotePeerPublicKey,
-                     uint16_t remotePeerPort) {
+                     uint16_t remotePeerPort,
+                     const char *presharedKey) {
     // Historical behavior: route everything via WireGuard.
     const IPAddress allowedIP(0, 0, 0, 0);
     const IPAddress allowedMask(0, 0, 0, 0);
     return beginAdvanced(localIP, privateKey, remotePeerAddress, remotePeerPublicKey,
-                         remotePeerPort, allowedIP, allowedMask);
+                         remotePeerPort, allowedIP, allowedMask, presharedKey);
 }
 
 bool WireGuard::beginAdvanced(const IPAddress &localIP,
@@ -63,7 +72,8 @@ bool WireGuard::beginAdvanced(const IPAddress &localIP,
                              const char *remotePeerPublicKey,
                              uint16_t remotePeerPort,
                              const IPAddress &allowedIP,
-                             const IPAddress &allowedMask) {
+                             const IPAddress &allowedMask,
+                             const char *presharedKey) {
     if (_is_initialized) {
         return true;
     }
@@ -143,8 +153,25 @@ bool WireGuard::beginAdvanced(const IPAddress &localIP,
     struct wireguardif_peer peer;
     memset(&peer, 0, sizeof(peer));
 
+    // preshared_key (unlike public_key) is a pointer to already-decoded raw
+    // bytes, not a base64 string -- wireguard_peer_init() memcpy()s it
+    // synchronously inside wireguardif_add_peer() below, so this stack
+    // buffer's lifetime only needs to outlive that one call.
+    uint8_t presharedKeyBytes[WIREGUARD_SESSION_KEY_LEN];
+    const uint8_t *presharedKeyPtr = nullptr;
+    if (presharedKey != nullptr && presharedKey[0] != '\0') {
+        size_t presharedKeyLen = sizeof(presharedKeyBytes);
+        if (wireguard_base64_decode(presharedKey, presharedKeyBytes, &presharedKeyLen)
+                && presharedKeyLen == sizeof(presharedKeyBytes)) {
+            presharedKeyPtr = presharedKeyBytes;
+        } else {
+            log_e(TAG "Failed to decode preshared key (bad base64 or wrong length) -- "
+                      "proceeding without one");
+        }
+    }
+
     peer.public_key = remotePeerPublicKey;
-    peer.preshared_key = nullptr;
+    peer.preshared_key = presharedKeyPtr;
     peer.allowed_ip = allowedIP;
     peer.allowed_mask = allowedMask;
     peer.endpoint_ip = endpoint4;

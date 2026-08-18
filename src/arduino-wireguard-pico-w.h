@@ -18,16 +18,20 @@ public:
      * Backward-compatible API:
      * - Allowed IPs: 0.0.0.0/0 (route everything through the tunnel)
      * - Listen port: remotePeerPort
+     * - presharedKey: optional, base64-encoded 32-byte PSK. nullptr/empty
+     *   means no PSK (matches every prior caller's behavior unchanged).
      */
     bool begin(const IPAddress& localIP,
                const char* privateKey,
                const char* remotePeerAddress,
                const char* remotePeerPublicKey,
-               uint16_t remotePeerPort);
+               uint16_t remotePeerPort,
+               const char* presharedKey = nullptr);
 
     /*
      * Configurable API:
      * - allowedIp/allowedMask: what should be routed via WireGuard (e.g. 10.8.0.0/24)
+     * - presharedKey: see begin() above.
      */
     bool beginAdvanced(const IPAddress& localIP,
                        const char* privateKey,
@@ -35,7 +39,8 @@ public:
                        const char* remotePeerPublicKey,
                        uint16_t remotePeerPort,
                        const IPAddress& allowedIp,
-                       const IPAddress& allowedMask);
+                       const IPAddress& allowedMask,
+                       const char* presharedKey = nullptr);
 
     void end();
 
