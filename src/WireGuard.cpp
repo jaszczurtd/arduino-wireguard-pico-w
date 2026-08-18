@@ -187,6 +187,16 @@ void WireGuard::end() {
     }
 
     wireguardif_remove_peer(wg_netif, peer_index);
+    // wireguardif_init() (called from netif_add() in beginAdvanced()) allocates
+    // a UDP PCB and a wireguard_device via udp_new()/mem_calloc(). Neither
+    // netif_remove() nor wireguardif_remove_peer() frees them -- only
+    // wireguardif_shutdown() does (udp_disconnect()+udp_remove()+free(device)).
+    // Without this call, every begin()/end() cycle leaks one UDP PCB; once
+    // lwIP's UDP PCB pool is exhausted, every future udp_new() inside
+    // wireguardif_init() returns NULL, netif_add() fails, and begin() fails
+    // permanently for the rest of the process's uptime. Must run before
+    // netif_remove() while wg_netif->state still points at the device.
+    wireguardif_shutdown(wg_netif);
     netif_remove(wg_netif);
 
     if (previous_default_netif != nullptr) {

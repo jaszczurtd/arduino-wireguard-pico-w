@@ -1050,8 +1050,13 @@ void wireguardif_shutdown(struct netif *netif) {
 		udp_remove(device->udp_pcb);
 		device->udp_pcb = NULL;
 	}
-	// remove device context.
-	free(device);
+	// remove device context. device was allocated via mem_calloc() (lwIP's
+	// own MEM_SIZE-bounded arena, since MEM_LIBC_MALLOC=0 in lwipopts.h for
+	// this port) -- must be freed with mem_free(), not libc free(), or the
+	// arena allocation is never actually returned. wireguardif_init()'s own
+	// error paths already use mem_free() for this same allocation; this was
+	// just an inconsistency in this specific function.
+	mem_free(device);
 	netif->state = NULL;
 }
 
