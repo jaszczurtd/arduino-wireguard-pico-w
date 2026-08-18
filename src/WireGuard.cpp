@@ -149,6 +149,22 @@ bool WireGuard::beginAdvanced(const IPAddress &localIP,
     peer.allowed_mask = allowedMask;
     peer.endpoint_ip = endpoint4;
     peer.endport_port = remotePeerPort;
+    // wireguardif_add_peer() (wireguardif.c) special-cases
+    // WIREGUARDIF_KEEPALIVE_DEFAULT (0xFFFF) to mean "use the library's own
+    // KEEPALIVE_TIMEOUT (10s)" -- any other value, including 0, is taken
+    // literally as the interval, and should_send_keepalive() only fires when
+    // that interval is > 0. The memset() above left this field at 0, which
+    // is indistinguishable from a caller *explicitly* disabling keepalives,
+    // even though no caller of begin()/beginAdvanced() ever set it -- it was
+    // just an unset struct field. Net effect: once a session reached
+    // Connected, this device sent zero outbound traffic until the caller's
+    // own periodic peerUp() check (a local status read, not real traffic)
+    // noticed the peer had gone down -- long enough for most home-router NAT
+    // UDP mappings to expire first. An overnight soak against a real cloud
+    // WireGuard server measured 1% tunnel uptime before this fix (one
+    // successful session, ~133s total); explicitly opting into the
+    // library's own default here is the fix.
+    peer.keep_alive = WIREGUARDIF_KEEPALIVE_DEFAULT;
 
     err_t perr = wireguardif_add_peer(wg_netif, &peer, &peer_index);
     if (perr != ERR_OK) {
