@@ -111,10 +111,9 @@ static err_t wireguardif_peer_output(struct netif *netif, struct pbuf *q, struct
         return ERR_ARG;
     }
     
-    log_i(TAG "Calling udp_sendto...");
-//    err_t result = udp_sendto_if(device->udp_pcb, q, &peer->ip, peer->port, device->underlying_netif);
-		err_t result = udp_sendto(device->udp_pcb, q, &peer->ip, peer->port);
-    log_i(TAG "udp_sendto returned: %d", result);
+    log_i(TAG "Calling udp_sendto_if...");
+    err_t result = udp_sendto_if(device->udp_pcb, q, &peer->ip, peer->port, device->underlying_netif);
+    log_i(TAG "udp_sendto_if returned: %d", result);
     
     // DEBUG: check lwIP errors
     if (result != ERR_OK) {
@@ -1063,9 +1062,7 @@ err_t wireguardif_init(struct netif *netif) {
 	uint8_t private_key[WIREGUARD_PRIVATE_KEY_LEN];
 	size_t private_key_len = sizeof(private_key);
 
-	struct netif* underlying_netif;
-	underlying_netif = tcpip_adapter_get_netif(TCPIP_ADAPTER_IF_STA);
-	log_i(TAG "underlying_netif = %p", underlying_netif);
+	struct netif* underlying_netif = NULL;
 
 	log_i(TAG "netif=%p state=%p netif_ok=%d state_ok=%d",
 		(void*)netif, netif ? netif->state : NULL,
@@ -1082,6 +1079,15 @@ err_t wireguardif_init(struct netif *netif) {
 
 		// The init data is passed into the netif_add call as the 'state' - we will replace this with our private state data
 		init_data = (struct wireguardif_init_data *)netif->state;
+
+		// Prefer the caller-supplied netif (WireGuard.cpp passes netif_default,
+		// captured before this netif_add() call) over the tcpip_adapter_get_netif()
+		// shim below -- on this Arduino-pico/CYW43 port that shim returns
+		// &cyw43_state.netif[CYW43_ITF_STA] directly, a different struct instance
+		// than the one this port's WiFi stack actually finishes initializing
+		// (output/linkoutput never get set on it), which hard-faults on first send.
+		underlying_netif = init_data->bind_netif ? init_data->bind_netif : tcpip_adapter_get_netif(TCPIP_ADAPTER_IF_STA);
+		log_i(TAG "underlying_netif = %p (bind_netif=%p)", underlying_netif, init_data->bind_netif);
 
 		// Clear out and set if function is successful
 		netif->state = NULL;
