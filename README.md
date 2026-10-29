@@ -47,14 +47,20 @@ static const char* WG_SERVER_PUBLIC_KEY = "SERVER_PUBLIC_KEY_BASE64";
 
 // Example configuration:
 // - local tunnel address: 10.8.0.50
-// - endpoint: 203.0.113.10:10000
-// - allowed IPs: 0.0.0.0/0 (full tunnel) or only your LAN/VPN ranges
+// - endpoint: 203.0.113.10:10000 (an IPv4 literal or a host name)
+// - allowed IPs: 10.8.0.0/24, so only the VPN range goes through the tunnel.
+//   0.0.0.0/0 here (or begin() instead of beginAdvanced()) makes a full
+//   tunnel: the interface becomes the default route and every later
+//   connection, DNS included, goes through WireGuard.
 static const IPAddress WG_LOCAL_IP(10, 8, 0, 50);
-static const char* WG_ENDPOINT = "wireguard IP address";
+static const char* WG_ENDPOINT = "203.0.113.10";
 static const uint16_t  WG_ENDPOINT_PORT = 10000;
 
-static const IPAddress WG_ALLOWED_IP(0, 0, 0, 0);
-static const IPAddress WG_ALLOWED_MASK(0, 0, 0, 0);
+static const IPAddress WG_ALLOWED_IP(10, 8, 0, 0);
+static const IPAddress WG_ALLOWED_MASK(255, 255, 255, 0);
+
+// A host inside the allowed range; the UDP probe only triggers the handshake.
+static const IPAddress WG_PEER_IP(10, 8, 0, 1);
 
 bool time_synchro(const char *tz, char *dest, int dest_size) {
   if(tz != NULL) {
@@ -99,7 +105,8 @@ void setup() {
     Serial.printf("NTP sync failed. check WiFi/DNS/UDP 123.\n");
   }
 
-  // beginAdvanced(...) = split tunnel (only WG_ALLOWED_IP/WG_ALLOWED_MASK through WG)
+  // beginAdvanced(...) with a range narrower than 0.0.0.0/0 = split tunnel:
+  // only WG_ALLOWED_IP/WG_ALLOWED_MASK goes through WireGuard.
   if (!wg.beginAdvanced(
         WG_LOCAL_IP,
         WG_PRIVATE_KEY,
@@ -115,11 +122,23 @@ void setup() {
     }
   }
 
-  // From this point the tunnel should attempt a handshake when traffic is sent.
+  // The handshake starts with the first packet sent into the tunnel; see loop().
 }
 
 void loop() {
-  // Your application code here.
+  wg.loop();  // prints the log lines queued by lwIP callbacks (IRQ context)
+
+  if (!wg.peerUp()) {
+    // No session key yet: send a tiny UDP probe to start the handshake
+    // (rate limited, 9 = discard port, no service needed on the peer).
+    wg.kickHandshake(WG_PEER_IP, 9);
+    delay(100);
+    return;
+  }
+
+  // Your application code here: WiFiClient/WiFiUDP to 10.8.0.0/24 goes
+  // through the tunnel, everything else leaves through WiFi as before.
+  delay(100);
 }
 ```
 
