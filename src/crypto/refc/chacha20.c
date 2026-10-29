@@ -81,11 +81,13 @@ static const uint32_t CHACHA20_CONSTANT_4 = 0x6b206574;
 // 3.  a += b; d ^= a; d <<<= 8;
 // 4.  c += d; b ^= c; b <<<= 7;
 
-#define QUARTERROUND(a, b, c, d)       \
-    a += b;  d ^= a;  d = ROTL32(d, 16);  \
-    c += d;  b ^= c;  b = ROTL32(b, 12);  \
-    a += b;  d ^= a;  d = ROTL32(d,  8);  \
-    c += d;  b ^= c;  b = ROTL32(b,  7)
+#define QUARTERROUND(a, b, c, d)                         \
+    do {                                                 \
+        (a) += (b);  (d) ^= (a);  (d) = ROTL32((d), 16); \
+        (c) += (d);  (b) ^= (c);  (b) = ROTL32((b), 12); \
+        (a) += (b);  (d) ^= (a);  (d) = ROTL32((d),  8); \
+        (c) += (d);  (b) ^= (c);  (b) = ROTL32((b),  7); \
+    } while (0)
 
 static inline void INNER_BLOCK(uint32_t *block) {
 	QUARTERROUND(block[0], block[4], block[ 8], block[12]); // column 0

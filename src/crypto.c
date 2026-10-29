@@ -12,11 +12,13 @@ void crypto_zero(void *dest, size_t len) {
 }
 
 bool crypto_equal(const void *a, const void *b, size_t size) {
+	const uint8_t *pa = (const uint8_t *)a;
+	const uint8_t *pb = (const uint8_t *)b;
 	uint8_t neq = 0;
 	while (size > 0) {
-		neq |= *(uint8_t *)a ^ *(uint8_t *)b;
-		a += 1;
-		b += 1;
+		neq |= *pa ^ *pb;
+		pa += 1;
+		pb += 1;
 		size -= 1;
 	}
 	return (neq) ? false : true;

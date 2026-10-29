@@ -60,10 +60,10 @@ extern "C" {
 // Your platform integration needs to provide implementations of these functions
 //
 
-void wireguard_platform_init();
+void wireguard_platform_init(void);
 
 // The number of milliseconds since system boot - for LwIP systems this could be sys_now()
-uint32_t wireguard_sys_now();
+uint32_t wireguard_sys_now(void);
 
 // Fill the supplied buffer with random data - random data is used for generating new session keys periodically
 void wireguard_random_bytes(void *bytes, size_t size);
@@ -75,7 +75,7 @@ void wireguard_random_bytes(void *bytes, size_t size);
 void wireguard_tai64n_now(uint8_t *output);
 
 // Is the system under load - i.e. should we generate cookie reply message in response to initiation messages
-bool wireguard_is_under_load();
+bool wireguard_is_under_load(void);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -10,15 +10,17 @@
 #endif
 
 // Mixing function G.
-#define B2S_G(a, b, c, d, x, y) {   \
-	v[a] = v[a] + v[b] + x;         \
-	v[d] = ROTR32(v[d] ^ v[a], 16); \
-	v[c] = v[c] + v[d];             \
-	v[b] = ROTR32(v[b] ^ v[c], 12); \
-	v[a] = v[a] + v[b] + y;         \
-	v[d] = ROTR32(v[d] ^ v[a], 8);  \
-	v[c] = v[c] + v[d];             \
-	v[b] = ROTR32(v[b] ^ v[c], 7); }
+#define B2S_G(a, b, c, d, x, y)                 \
+	do {                                        \
+		v[(a)] = v[(a)] + v[(b)] + (x);         \
+		v[(d)] = ROTR32(v[(d)] ^ v[(a)], 16);   \
+		v[(c)] = v[(c)] + v[(d)];               \
+		v[(b)] = ROTR32(v[(b)] ^ v[(c)], 12);   \
+		v[(a)] = v[(a)] + v[(b)] + (y);         \
+		v[(d)] = ROTR32(v[(d)] ^ v[(a)], 8);    \
+		v[(c)] = v[(c)] + v[(d)];               \
+		v[(b)] = ROTR32(v[(b)] ^ v[(c)], 7);    \
+	} while (0)
 
 // Initialization Vector.
 static const uint32_t blake2s_iv[8] =

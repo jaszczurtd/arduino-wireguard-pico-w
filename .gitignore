@@ -1,0 +1,2 @@
+extras/tests/host/.build/
+extras/tests/hardware/*/secrets.h

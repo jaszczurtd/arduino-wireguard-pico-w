@@ -167,6 +167,7 @@ static void http_get_once() {
 
 void loop() {
   watchdog_update();
+  wg.loop();  // prints log lines queued by lwIP callbacks (IRQ context)
   digitalWrite(LED_BUILTIN, (alertBlink = !alertBlink));
 
   static uint32_t last = 0;

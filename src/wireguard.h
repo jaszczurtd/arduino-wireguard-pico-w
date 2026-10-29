@@ -47,6 +47,7 @@
 
 // Platform-specific functions that need to be implemented per-platform
 #include "wireguard-platform.h"
+#include "wireguard_replay.h"
 
 // tai64n contains 64-bit seconds and 32-bit nano offset (12 bytes)
 #define WIREGUARD_TAI64N_LEN		(12)
@@ -88,8 +89,7 @@ struct wireguard_keypair {
 	uint32_t last_tx;
 	uint32_t last_rx;
 
-	uint32_t replay_bitmap;
-	uint64_t replay_counter;
+	wireguard_replay_state_t replay;
 
 	uint32_t local_index; // This is the index we generated for our end
 	uint32_t remote_index; // This is the index on the other end

@@ -47,10 +47,10 @@
 
 // 5.4 Messages
 // Constants
-static const uint8_t CONSTRUCTION[37] = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"; // The UTF-8 string literal "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s", 37 bytes of output
-static const uint8_t IDENTIFIER[34] = "WireGuard v1 zx2c4 Jason@zx2c4.com"; // The UTF-8 string literal "WireGuard v1 zx2c4 Jason@zx2c4.com", 34 bytes of output
-static const uint8_t LABEL_MAC1[8] = "mac1----"; // Label-Mac1 The UTF-8 string literal "mac1----", 8 bytes of output.
-static const uint8_t LABEL_COOKIE[8] = "cookie--"; // Label-Cookie The UTF-8 string literal "cookie--", 8 bytes of output
+static const uint8_t CONSTRUCTION[] ="Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"; // The UTF-8 string literal "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s", 37 bytes of output
+static const uint8_t IDENTIFIER[] ="WireGuard v1 zx2c4 Jason@zx2c4.com"; // The UTF-8 string literal "WireGuard v1 zx2c4 Jason@zx2c4.com", 34 bytes of output
+static const uint8_t LABEL_MAC1[] ="mac1----"; // Label-Mac1 The UTF-8 string literal "mac1----", 8 bytes of output.
+static const uint8_t LABEL_COOKIE[] ="cookie--"; // Label-Cookie The UTF-8 string literal "cookie--", 8 bytes of output
 
 static const char *base64_lookup = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -65,12 +65,12 @@ void wireguard_init() {
 	wireguard_blake2s_ctx ctx;
 	// Pre-calculate chaining key hash
 	wireguard_blake2s_init(&ctx, WIREGUARD_HASH_LEN, NULL, 0);
-	wireguard_blake2s_update(&ctx, CONSTRUCTION, sizeof(CONSTRUCTION));
+	wireguard_blake2s_update(&ctx, CONSTRUCTION, sizeof(CONSTRUCTION) - 1);
 	wireguard_blake2s_final(&ctx, construction_hash);
 	// Pre-calculate initial handshake hash - uses construction_hash calculated above
 	wireguard_blake2s_init(&ctx, WIREGUARD_HASH_LEN, NULL, 0);
 	wireguard_blake2s_update(&ctx, construction_hash, sizeof(construction_hash));
-	wireguard_blake2s_update(&ctx, IDENTIFIER, sizeof(IDENTIFIER));
+	wireguard_blake2s_update(&ctx, IDENTIFIER, sizeof(IDENTIFIER) - 1);
 	wireguard_blake2s_final(&ctx, identifier_hash);
 }
 
@@ -321,47 +321,8 @@ static void wireguard_kdf3(uint8_t *tau1, uint8_t *tau2, uint8_t *tau3, const ui
 }
 
 bool wireguard_check_replay(struct wireguard_keypair *keypair, uint64_t seq) {
-	// Implementation of packet replay window - as per RFC2401
-	// Adapted from code in Appendix C at https://tools.ietf.org/html/rfc2401
-	uint32_t diff;
-	bool result = false;
-	size_t ReplayWindowSize = sizeof(keypair->replay_bitmap); // 32 bits
-
-	if (seq != 0) {
-		if (seq > keypair->replay_counter) {
-			// new larger sequence number
-			diff = seq - keypair->replay_counter;
-			if (diff < ReplayWindowSize) {
-				// In window
-				keypair->replay_bitmap <<= diff;
-				// set bit for this packet
-				keypair->replay_bitmap |= 1;
-			} else {
-				// This packet has a "way larger"
-				keypair->replay_bitmap = 1;
-			}
-			keypair->replay_counter = seq;
-			// larger is good
-			result = true;
-		} else {
-			diff = keypair->replay_counter - seq;
-			if (diff < ReplayWindowSize) {
-				if (keypair->replay_bitmap & ((uint32_t)1 << diff)) {
-					// already seen
-				} else {
-					// mark as seen
-					keypair->replay_bitmap |= ((uint32_t)1 << diff);
-					// out of order but good
-					result = true;
-				}
-			} else {
-				// too old or wrapped
-			}
-		}
-	} else {
-		// first == 0 or wrapped
-	}
-	return result;
+	// RFC 6479-style ring bitmap with the current WireGuard window size.
+	return keypair != NULL && wireguard_replay_check(&keypair->replay, seq);
 }
 
 struct wireguard_keypair *get_peer_keypair_for_idx(struct wireguard_peer *peer, uint32_t idx) {
@@ -505,8 +466,7 @@ void wireguard_start_session(struct wireguard_peer *peer, bool initiator) {
 		wireguard_kdf2(new_keypair.receiving_key, new_keypair.sending_key, handshake->chaining_key, NULL, 0);
 	}
 
-	new_keypair.replay_bitmap = 0;
-	new_keypair.replay_counter = 0;
+	wireguard_replay_reset(&new_keypair.replay);
 
 	new_keypair.last_tx = 0;
 	new_keypair.last_rx = 0; // No packets received yet
@@ -573,7 +533,7 @@ struct wireguard_peer *wireguard_process_initiation_message(struct wireguard_dev
 	bool rate_limit;
 	bool replay;
 
-	log_i(TAG "Processing initiation message from peer...");
+	log_d(TAG "Processing initiation message from peer...");
 
 	// We are the responder, other end is the initiator
 
@@ -983,8 +943,8 @@ bool wireguard_peer_init(struct wireguard_device *device, struct wireguard_peer 
 			memset(&peer->cookie, 0, WIREGUARD_COOKIE_LEN);
 
 			// Precompute keys to deal with mac1/2 calculation
-			wireguard_mac_key(peer->label_mac1_key, peer->public_key, LABEL_MAC1, sizeof(LABEL_MAC1));
-			wireguard_mac_key(peer->label_cookie_key, peer->public_key, LABEL_COOKIE, sizeof(LABEL_COOKIE));
+			wireguard_mac_key(peer->label_mac1_key, peer->public_key, LABEL_MAC1, sizeof(LABEL_MAC1) - 1);
+			wireguard_mac_key(peer->label_cookie_key, peer->public_key, LABEL_COOKIE, sizeof(LABEL_COOKIE) - 1);
 
 			peer->valid = true;
 		} else {
@@ -1003,9 +963,9 @@ bool wireguard_device_init(struct wireguard_device *device, const uint8_t *priva
 	if (device->valid) {
 		generate_cookie_secret(device);
 		// 5.4.4 Cookie MACs - The value Hash(Label-Mac1 || Spubm' ) above can be pre-computed.
-		wireguard_mac_key(device->label_mac1_key, device->public_key, LABEL_MAC1, sizeof(LABEL_MAC1));
+		wireguard_mac_key(device->label_mac1_key, device->public_key, LABEL_MAC1, sizeof(LABEL_MAC1) - 1);
 		// 5.4.7 Under Load: Cookie Reply Message - The value Hash(Label-Cookie || Spubm) above can be pre-computed.
-		wireguard_mac_key(device->label_cookie_key, device->public_key, LABEL_COOKIE, sizeof(LABEL_COOKIE));
+		wireguard_mac_key(device->label_cookie_key, device->public_key, LABEL_COOKIE, sizeof(LABEL_COOKIE) - 1);
 
 	} else {
 		crypto_zero(device->private_key, WIREGUARD_PRIVATE_KEY_LEN);

@@ -20,12 +20,7 @@
 
 static bool is_platform_initialized = false;
 
-static void __attribute__((unused)) secure_bzero(void *p, size_t n) {
-  volatile uint8_t *vp = (volatile uint8_t *)p;
-  while (n--) *vp++ = 0;
-}
-
-void wireguard_platform_init() {
+void wireguard_platform_init(void) {
   if (is_platform_initialized) return;
 
   is_platform_initialized = true;
@@ -61,7 +56,7 @@ void wireguard_random_bytes(void *bytes, size_t size) {
     }
 }
 
-uint32_t wireguard_sys_now() {
+uint32_t wireguard_sys_now(void) {
   // we use lwIP sys_now() instead of millis() for better synchro with lwIP
   extern uint32_t sys_now(void);
   return sys_now();
@@ -80,6 +75,6 @@ void wireguard_tai64n_now(uint8_t *output) {
   U32TO8_BIG(output + 8, nanos);
 }
 
-bool wireguard_is_under_load() {
+bool wireguard_is_under_load(void) {
   return false;
 }

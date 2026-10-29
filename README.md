@@ -13,11 +13,12 @@ The goal of the port is to keep the original API as intact as possible, while re
 
 The original library targets ESP32 and depends on ESP-IDF pieces. For Pico W (Arduino-Pico + lwIP) this port replaces or adapts the following:
 
-- **ESP logging** (`ESP_LOGx`) replaced with lightweight stubs / optional `Serial` logging.
+- **ESP logging** (`ESP_LOGx`) replaced with a small `Serial` logger that is safe to call from lwIP callbacks (see [Logging](#logging)).
 - **`tcpip_adapter_*`** (ESP-IDF networking glue) replaced with a Pico/lwIP shim.
 - **Netif lookup** simplified: on Pico W the STA interface maps to **lwIP's default netif** (`netif_default`).
 - **Platform glue** moved into `src/wg_port_pico.h` and `src/wireguard-platform.c`.
 - **Build fixes** for ARM GCC (RP2040 toolchain), including a warning fix in `x25519.c` (treat `a24` as an 8-limb field element to avoid false-positive overread warnings).
+- **Data path**: encapsulated UDP leaves explicitly through the Wi-Fi interface (so full-tunnel routing cannot loop back into the tunnel), received chained `pbuf`s are coalesced before parsing, the anti-replay window is an RFC 6479 style ring of 8192 counters that accepts counter zero once, and received inner packets are checked against AllowedIPs by their source address.
 
 ## Requirements
 
@@ -26,6 +27,7 @@ The original library targets ESP32 and depends on ESP-IDF pieces. For Pico W (Ar
 - Arduino-Pico core (Earle Philhower)
 - WiFi enabled (CYW43)
 - IPv4 networking (WireGuard endpoint by IPv4 literal or hostname is supported)
+- Wall clock synchronized (NTP) before `begin()`; the handshake carries a timestamp
 
 ## Usage (example)
 
@@ -125,35 +127,84 @@ void loop() {
 
 - `begin(localIP, privateKey, remotePeerAddress, remotePeerPublicKey, remotePeerPort)`
   - Backward-compatible mode.
-  - Uses full-tunnel routing (`AllowedIPs = 0.0.0.0/0`).
+  - Uses full-tunnel routing (`AllowedIPs = 0.0.0.0/0`): the WireGuard interface
+    becomes lwIP's default route, so every connection opened afterwards, DNS
+    included, goes through the tunnel. Resolve names and sync NTP before `begin()`.
 
 - `beginAdvanced(localIP, privateKey, remotePeerAddress, remotePeerPublicKey, remotePeerPort, allowedIp, allowedMask)`
   - Split-tunnel mode.
   - Routes only `allowedIp/allowedMask` through WireGuard.
 
+- Both `begin()` variants return `false` and log an error while the wall clock
+  is before 2020-01-01 (NTP not done yet). Any later failure, for example an
+  invalid peer key, leaves the lwIP stack as it was, so `begin()` can be retried.
+
 - `end()`
-  - Removes WireGuard peer/interface and restores previous default netif.
+  - Restores the previous default netif, removes the interface and the peer,
+    stops the lwIP timer and closes the UDP socket. `begin()` may be called again.
 
 - `is_initialized()`
   - Returns whether WireGuard interface setup has completed.
+
+- `loop()`
+  - Prints the log lines that lwIP callbacks queued from IRQ context.
+  - Call it from your `loop()`; `peerUp()` and `kickHandshake()` flush the queue too.
 
 - `peerUp(...)`
   - Returns `true` when a valid session key exists.
 
 - `kickHandshake(probeIp, probePort, minIntervalMs)`
   - Sends a tiny UDP probe to trigger handshake in a non-blocking way.
+  - The first call after `begin()` always sends; later calls within
+    `minIntervalMs` return `true` without sending. Returns `false` when
+    `probePort` is 0 or the probe could not be sent.
+
+## Logging
+
+On Arduino-Pico the lwIP callbacks (receive, timers, output) run inside a
+background IRQ, so the library never writes to `Serial` from them. A line logged
+from IRQ context goes to a small queue; `WireGuard::loop()`, `peerUp()` and
+`kickHandshake()` print the queue from your sketch. When the queue overflows,
+the next flush prints how many lines were dropped.
+
+`WG_LOG_LEVEL` selects the levels compiled in (build flag, for example
+`-DWG_LOG_LEVEL=5` in `build.extra_flags`):
+
+| Value | Level | Content |
+|---|---|---|
+| 0 | none | |
+| 1 | error | failures |
+| 2 | warn (default) | failures and suspicious packets |
+| 3 | info | handshakes, interface start |
+| 4 | debug | initialization details |
+| 5 | verbose | every sent and received packet |
+
+Queue size: `WG_LOG_ISR_SLOTS` (default 16 lines). Line length including the
+level prefix: `WG_LOG_LINE_MAX` (default 128 bytes).
 
 ## Notes / limitations
 
 - This port is currently focused on **Pico(2) W + lwIP**. Other RP2040/2350 network stacks are not covered.
-- The netif mapping assumes a **single active WiFi STA interface** (typical for Pico W).
-- If you run multiple netifs or unusual routing, you may need to adjust the `tcpip_adapter_get_netif()` shim.
+- The encapsulated traffic leaves through the netif that was lwIP's default when `begin()` ran (the WiFi STA interface on Pico W). With several netifs, bring the right one up as default before `begin()`.
 - WireGuard does not “connect” like TCP; the handshake typically starts when the stack needs to send traffic. Test by sending UDP/TCP traffic through the tunnel to an allowed destination.
 
 ## Files of interest (port layer)
 
-- `src/wg_port_pico.h` – Pico W / lwIP compatibility glue (ESP-IDF replacements)
+- `src/wg_port_pico.h`, `src/wg_port_pico.cpp` – Pico W / lwIP compatibility layer (ESP-IDF replacements, IRQ-safe logger)
 - `src/wireguard-platform.c` – platform init and helpers used by the core WireGuard implementation
+- `src/wireguard_replay.h`, `src/wireguard_pbuf.h`, `src/wireguard_allowed_ip.h` – anti-replay window, contiguous `pbuf` helper and the AllowedIPs source check
+
+## Tests
+
+`extras/tests/host/run.sh` builds the helper headers above and the crypto primitives
+against the lwIP sources bundled with the installed Arduino-Pico core and runs
+their tests on the host (`g++`, no board needed; BLAKE2s, X25519 and
+ChaCha20-Poly1305 are checked against known vectors). Set `LWIP_DIR` to use
+another lwIP checkout.
+
+`extras/tests/hardware/wg_services` is a sketch that exercises split and full tunnel,
+the endpoint given as a name, WiFi loss under a tunnel and a soak across key
+renewals against a Linux WireGuard endpoint; see `extras/tests/hardware/README.md`.
 
 ## License
 
