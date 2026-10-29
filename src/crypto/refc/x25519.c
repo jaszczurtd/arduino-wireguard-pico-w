@@ -233,6 +233,9 @@ static void x25519_core(fe xs[5], const uint8_t scalar[X25519_BYTES], const uint
 #if X25519_MEMCPY_PARAMS
     fe x1i;
     swapin(x1i,x1);
+    // Point at the aligned copy (x1i), not the original x1 -- using x1
+    // directly causes an unaligned word read that faults on strict-
+    // alignment targets (e.g. Cortex-M0+/ARMv6-M).
     x1 = (const uint8_t *)x1i;
 #endif
     limb_t swap = 0;
