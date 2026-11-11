@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Builds and runs the host tests of the helper headers in src/
-# (wireguard_replay.h, wireguard_pbuf.h, wireguard_allowed_ip.h) and of the
-# crypto primitives (src/crypto.c, src/crypto/refc/).
+# Builds and runs the host tests:
+# - test_wireguard_helpers: the helper headers in src/ (wireguard_replay.h,
+#   wireguard_pbuf.h, wireguard_allowed_ip.h, wireguard_timestamp.h) and the
+#   crypto primitives (src/crypto.c, src/crypto/refc/);
+# - test_wireguardif_protocol: two engines of the library (src/wireguard.c,
+#   src/wireguardif.c) exchanging captured and forged datagrams.
 # Needs gcc/g++ and the lwIP sources. LWIP_DIR defaults to the lwIP bundled
 # with the newest installed Arduino-Pico core; BUILD_DIR defaults to
 # extras/tests/host/.build.
@@ -20,10 +23,22 @@ fi
 OUT="${BUILD_DIR:-$HERE/.build}"
 mkdir -p "$OUT"
 INCLUDES=(-I"$HERE" -I"$SRC" -I"$LWIP_DIR/src/include")
+# The engine includes <Arduino.h> through wg_port_pico.h; on the host it gets
+# the stand-in from fakes/. Warning flags of the Arduino-Pico core at
+# "warnings: all", errors on.
+ENGINE_FLAGS=(-std=gnu17 -O1 -g -Wall -Wextra -Wno-type-limits -Wno-unused-parameter
+              -Wno-missing-field-initializers -Werror -I"$HERE/fakes")
 
 # lwIP itself is compiled with the test's options but without -Werror.
-for unit in pbuf mem memp def stats; do
-  gcc -std=c11 -O1 -g -Wall "${INCLUDES[@]}" -c "$LWIP_DIR/src/core/$unit.c" -o "$OUT/$unit.o"
+LWIP_UNITS=(core/pbuf core/mem core/memp core/def core/stats core/init core/inet_chksum
+            core/ip core/netif core/timeouts core/udp core/ipv4/ip4 core/ipv4/ip4_addr)
+for unit in "${LWIP_UNITS[@]}"; do
+  gcc -std=c11 -O1 -g -Wall "${INCLUDES[@]}" -c "$LWIP_DIR/src/$unit.c" -o "$OUT/lwip_$(basename "$unit").o"
+done
+LWIP_HEAP_OBJS=("$OUT"/lwip_pbuf.o "$OUT"/lwip_mem.o "$OUT"/lwip_memp.o "$OUT"/lwip_def.o "$OUT"/lwip_stats.o)
+LWIP_ALL_OBJS=()
+for unit in "${LWIP_UNITS[@]}"; do
+  LWIP_ALL_OBJS+=("$OUT/lwip_$(basename "$unit").o")
 done
 
 # The library's crypto, as shipped, with the library warning flags.
@@ -37,8 +52,16 @@ for unit in "${CRYPTO[@]}"; do
 done
 
 g++ -std=c++17 -O1 -g -Wall -Wextra -Werror "${INCLUDES[@]}" \
-  "$HERE/test_wireguard_helpers.cpp" "$OUT"/pbuf.o "$OUT"/mem.o "$OUT"/memp.o "$OUT"/def.o "$OUT"/stats.o \
+  "$HERE/test_wireguard_helpers.cpp" "${LWIP_HEAP_OBJS[@]}" \
   "${CRYPTO_OBJS[@]}" -o "$OUT/test_wireguard_helpers"
+
+# The protocol test compiles wireguardif.c into itself (see the file header).
+gcc "${ENGINE_FLAGS[@]}" "${INCLUDES[@]}" -c "$SRC/wireguard.c" -o "$OUT/wireguard.o"
+gcc "${ENGINE_FLAGS[@]}" "${INCLUDES[@]}" -c "$HERE/test_wireguardif_protocol.c" \
+  -o "$OUT/test_wireguardif_protocol.o"
+gcc -o "$OUT/test_wireguardif_protocol" "$OUT/test_wireguardif_protocol.o" "$OUT/wireguard.o" \
+  "${CRYPTO_OBJS[@]}" "${LWIP_ALL_OBJS[@]}"
 
 echo "lwIP: $LWIP_DIR"
 "$OUT/test_wireguard_helpers"
+"$OUT/test_wireguardif_protocol"

@@ -269,7 +269,7 @@ static void wireguardif_process_response_message(struct wireguard_device *device
 		log_i(TAG "good handshake from %08lx:%d", (unsigned long)WG_IP4_U32(addr), port);
 		update_peer_addr(peer, addr, port);
 
-		wireguard_start_session(peer, true);
+		wireguard_start_session(peer, &peer->handshake, true);
 		wireguardif_send_keepalive(device, peer);
 
 		// Set the IF-UP flag on netif
@@ -323,8 +323,6 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 	keypair = get_peer_keypair_for_idx(peer, idx);
 
 	if (keypair) {
-		// The receive-side message limit is enforced by the replay window;
-		// sending_counter belongs to the other direction.
 		if (
 				(keypair->receiving_valid) &&
 				!wireguard_expired(keypair->keypair_millis, REJECT_AFTER_TIME)
@@ -334,12 +332,22 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 			src = &data_hdr->enc_packet[0];
 			src_len = data_len;
 
-			// We don't know the unpadded size until we have decrypted the packet and validated/inspected the IP header
-			pbuf = pbuf_alloc(PBUF_TRANSPORT, src_len - WIREGUARD_AUTHTAG_LEN, PBUF_RAM);
+			pbuf = NULL;
+			// 6.2 Refuse to receive any more transport data messages after
+			// Reject-After-Messages. The counter is not authenticated yet, so only
+			// this packet is dropped and the keypair stays.
+			if (nonce < REJECT_AFTER_MESSAGES) {
+				// We don't know the unpadded size until we have decrypted the packet and validated/inspected the IP header
+				pbuf = pbuf_alloc(PBUF_TRANSPORT, src_len - WIREGUARD_AUTHTAG_LEN, PBUF_RAM);
+			}
 			if (pbuf) {
 				// Decrypt the packet
 				memset(pbuf->payload, 0, pbuf->tot_len);
-				if (wireguard_decrypt_packet(pbuf->payload, src, src_len, nonce, keypair)) {
+				if (wireguard_decrypt_packet(pbuf->payload, src, src_len, nonce, keypair) &&
+						// 5.4.6 The counter is checked against the sliding window right
+						// after the authentication tag and before any peer state changes;
+						// keep-alive packets included (6.5).
+						wireguard_check_replay(keypair, nonce)) {
 
 					// 3. Since the packet has authenticated correctly, the source IP of the outer UDP/IP packet is used to update the endpoint for peer TrMv...WXX0.
 					// Update the peer location
@@ -349,13 +357,15 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 					keypair->last_rx = now;
 					peer->last_rx = now;
 
-					// Might need to shuffle next key --> current keypair
-					keypair_update(peer, keypair);
-
 					// Check to see if we should rekey
 					if (keypair->initiator && wireguard_expired(keypair->keypair_millis, REJECT_AFTER_TIME - peer->keepalive_interval - REKEY_TIMEOUT)) {
 						peer->send_handshake = true;
 					}
+
+					// Might need to shuffle next key --> current keypair. A next keypair
+					// moves to current here, so keypair must not be used afterwards.
+					keypair_update(peer, keypair);
+					keypair = NULL;
 
 					// Make sure that link is reported as up
 					netif_set_link_up(device->netif);
@@ -363,42 +373,36 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 					if (pbuf->tot_len > 0) {
 						//4a. Once the packet payload is decrypted, the interface has a plaintext packet. If this is not an IP packet, it is dropped.
 						iphdr = (struct ip_hdr *)pbuf->payload;
-						// Check for packet replay / dupes
-						if (wireguard_check_replay(keypair, nonce)) {
 
-							// 4b. Otherwise, WireGuard checks to see if the source IP address of the plaintext inner-packet routes correspondingly in the cryptokey routing table
-							// Also check packet length!
+						// 4b. Otherwise, WireGuard checks to see if the source IP address
+						// of the plaintext inner-packet routes correspondingly in the
+						// cryptokey routing table. The authenticated peer sets the
+						// plaintext length and need not pad it, so read the IPv4 header
+						// only when all of it is there. The engine routes IPv4 only:
+						// IPv6 and anything else is dropped, also where lwIP is built
+						// with IPv6.
 #if LWIP_IPV4
-							if ((IPH_V(iphdr) == 4) && wireguard_ipv4_source_is_allowed(peer, iphdr)) {
-								source_ok = true;
-								header_len = PP_NTOHS(IPH_LEN(iphdr));
-							}
+						if ((pbuf->tot_len >= IP_HLEN) && (IPH_V(iphdr) == 4) && wireguard_ipv4_source_is_allowed(peer, iphdr)) {
+							source_ok = true;
+							header_len = PP_NTOHS(IPH_LEN(iphdr));
+						}
 #endif /* LWIP_IPV4 */
-#if LWIP_IPV6
-							if (IPH_V(iphdr) == 6) {
-								// TODO: IPV6 support for route filtering
-								header_len = PP_NTOHS(IPH_LEN(iphdr));
-								source_ok = true;
-							}
-#endif /* LWIP_IPV6 */
-							if (header_len <= pbuf->tot_len) {
-
-								// 5. If the plaintext packet has not been dropped, it is inserted into the receive queue of the wg0 interface.
-								if (source_ok) {
-									// Send packet to be process by LWIP
-									ip_input(pbuf, device->netif);
-									// pbuf is owned by IP layer now
-									pbuf = NULL;
-								}
-							} else {
-								// IP header is corrupt or lied about packet size
-							}
+						if (source_ok && (header_len <= pbuf->tot_len)) {
+							// 5. If the plaintext packet has not been dropped, it is inserted into the receive queue of the wg0 interface.
+							// Send packet to be process by LWIP
+							ip_input(pbuf, device->netif);
+							// pbuf is owned by IP layer now
+							pbuf = NULL;
 						} else {
-							// This is a duplicate packet / replayed / too far out of order
+							// Not IPv4 from an allowed source, or the IP header is corrupt
+							// or lied about the packet size
 						}
 					} else {
 						// This was a keep-alive packet
 					}
+				} else {
+					// Failed authentication, or a duplicate / replayed / too far out of
+					// order packet
 				}
 
 				if (pbuf) {
@@ -408,9 +412,12 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 
 
 		} else {
-			//After Reject-After-Messages transport data messages or after the current secure session is Reject- After-Time seconds old,
-			// whichever comes first, WireGuard will refuse to send or receive any more transport data messages using the current secure session,
-			// until a new secure session is created through the 1-RTT handshake
+			// After the current secure session is Reject-After-Time seconds old
+			// WireGuard refuses to send or receive any more transport data messages
+			// using it, until a new secure session is created through the 1-RTT
+			// handshake. Reject-After-Messages is checked above against the
+			// received counter and only drops the packet, which is not
+			// authenticated at that point.
 			keypair_destroy(keypair);
 		}
 
@@ -445,14 +452,17 @@ static struct pbuf *wireguardif_initiate_handshake(struct wireguard_device *devi
 	return pbuf;
 }
 
-static void wireguardif_send_handshake_response(struct wireguard_device *device, struct wireguard_peer *peer) {
+// The response goes to the source of the initiation, which is not taken as
+// the peer endpoint (see wireguardif_network_rx()). The responder state lives
+// in device->remote_handshake and is wiped here on every path.
+static void wireguardif_send_handshake_response(struct wireguard_device *device, struct wireguard_peer *peer, const ip_addr_t *addr, u16_t port) {
 	struct message_handshake_response packet;
 	struct pbuf *pbuf = NULL;
 	err_t err = ERR_OK;
 
 	if (wireguard_create_handshake_response(device, peer, &packet)) {
 
-		wireguard_start_session(peer, false);
+		wireguard_start_session(peer, &device->remote_handshake, false);
 
 		// Send this packet out!
 		pbuf = pbuf_alloc(PBUF_TRANSPORT, sizeof(struct message_handshake_response), PBUF_RAM);
@@ -460,11 +470,12 @@ static void wireguardif_send_handshake_response(struct wireguard_device *device,
 			err = pbuf_take(pbuf, &packet, sizeof(struct message_handshake_response));
 			if (err == ERR_OK) {
 				// OK!
-				wireguardif_peer_output(device->netif, pbuf, peer);
+				wireguardif_device_output(device, pbuf, addr, port);
 			}
 			pbuf_free(pbuf);
 		}
 	}
+	handshake_destroy(&device->remote_handshake);
 }
 
 static size_t get_source_addr_port(const ip_addr_t *addr, u16_t port, uint8_t *buf, size_t buflen) {
@@ -640,11 +651,16 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
 
 				peer = wireguard_process_initiation_message(device, msg_initiation);
 				if (peer) {
-					// Update the peer location
-					update_peer_addr(peer, addr, port);
-
-					// Send back a handshake response
-					wireguardif_send_handshake_response(device, peer);
+					// An initiation newer than the greatest timestamp passes even when it
+					// is a captured one replayed from elsewhere, e.g. after a device reset
+					// or one that never reached this device. So it leaves the initiation
+					// this device has in flight alone (the responder state lives in
+					// device->remote_handshake) and does not move the endpoint: the
+					// response goes back to its source. The endpoint follows
+					// authenticated transport packets and the response to this device's
+					// own initiation, which a replayer cannot make without the session
+					// keys or the ephemeral key of that initiation.
+					wireguardif_send_handshake_response(device, peer, addr, port);
 				}
 			}
 			break;
@@ -669,12 +685,11 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
 			msg_cookie = (struct message_cookie_reply *)data;
 			peer = peer_lookup_by_handshake(device, msg_cookie->receiver);
 			if (peer) {
-				if (wireguard_process_cookie_message(device, peer, msg_cookie)) {
-					// Update the peer location
-					update_peer_addr(peer, addr, port);
-
-					// Don't send anything out - we stay quiet until the next initiation message
-				}
+				// 5.4.7 A valid cookie reply only stores the cookie: anyone who saw the
+				// initiation and knows the responder's public key can forge one, so it
+				// must not move the endpoint. Nothing goes out until the next
+				// initiation message.
+				(void)wireguard_process_cookie_message(device, peer, msg_cookie);
 			}
 			break;
 
@@ -813,6 +828,18 @@ err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *cu
 		}
 		if (current_port) {
 			*current_port = peer->port;
+		}
+	}
+	return result;
+}
+
+err_t wireguardif_peer_greatest_timestamp(struct netif *netif, u8_t peer_index, uint8_t *timestamp, size_t max_len) {
+	struct wireguard_peer *peer;
+	err_t result = ERR_ARG;
+	if ((timestamp != NULL) && (max_len >= WIREGUARDIF_TIMESTAMP_LEN)) {
+		result = wireguardif_lookup_peer(netif, peer_index, &peer);
+		if (result == ERR_OK) {
+			memcpy(timestamp, peer->greatest_timestamp, WIREGUARDIF_TIMESTAMP_LEN);
 		}
 	}
 	return result;
@@ -958,23 +985,23 @@ static bool should_send_keepalive(struct wireguard_peer *peer) {
 	return result;
 }
 
-static bool should_destroy_current_keypair(struct wireguard_peer *peer) {
+static bool should_destroy_keypair(const struct wireguard_keypair *keypair) {
 	bool result = false;
-	if (peer->curr_keypair.valid &&
-			(wireguard_expired(peer->curr_keypair.keypair_millis, REJECT_AFTER_TIME) ||
-			(peer->curr_keypair.sending_counter >= REJECT_AFTER_MESSAGES))
+	if (keypair->valid &&
+			(wireguard_expired(keypair->keypair_millis, REJECT_AFTER_TIME) ||
+			(keypair->sending_counter >= REJECT_AFTER_MESSAGES))
 		) {
 		result = true;
 	}
 	return result;
 }
 
-static bool should_reset_peer(struct wireguard_peer *peer) {
-	bool result = false;
-	if (peer->curr_keypair.valid && (wireguard_expired(peer->curr_keypair.keypair_millis, REJECT_AFTER_TIME * 3))) {
-		result = true;
-	}
-	return result;
+static bool should_reset_peer(const struct wireguard_peer *peer) {
+	// 6.3 If no new secure session is created after (Reject-After-Time * 3)
+	// seconds, the current, previous and next secure sessions are discarded and
+	// zeroed out, together with any partially completed handshake and its
+	// ephemeral keys.
+	return peer->has_session && wireguard_expired(peer->last_session_millis, REJECT_AFTER_TIME * 3);
 }
 
 static void wireguardif_tmr(void *arg) {
@@ -1020,19 +1047,30 @@ static void wireguardif_tmr(void *arg) {
 
 			// Do we need to rekey / send a handshake?
 			if (should_reset_peer(peer)) {
-				// Nothing back for too long - we should wipe out all crypto state
+				// No new session for too long - wipe out all crypto state
 				keypair_destroy(&peer->next_keypair);
 				keypair_destroy(&peer->curr_keypair);
 				keypair_destroy(&peer->prev_keypair);
 				handshake_destroy(&peer->handshake);
+				peer->has_session = false;
+				peer->last_session_millis = 0u;
 
-				// Revert back to default IP/port if these were altered
-				peer->ip = peer->connect_ip;
-				peer->port = peer->connect_port;
+				// Revert to the configured IP/port if these were altered; without a
+				// configured endpoint keep the learned one
+				if (!ip_addr_isany(&peer->connect_ip) && (peer->connect_port != 0u)) {
+					peer->ip = peer->connect_ip;
+					peer->port = peer->connect_port;
+				}
 			}
-			if (should_destroy_current_keypair(peer)) {
-				// Destroy current keypair
+			// Destroy every keypair that can no longer send or receive
+			if (should_destroy_keypair(&peer->curr_keypair)) {
 				keypair_destroy(&peer->curr_keypair);
+			}
+			if (should_destroy_keypair(&peer->prev_keypair)) {
+				keypair_destroy(&peer->prev_keypair);
+			}
+			if (should_destroy_keypair(&peer->next_keypair)) {
+				keypair_destroy(&peer->next_keypair);
 			}
 			if (should_send_keepalive(peer)) {
 				wireguardif_send_keepalive(device, peer);
@@ -1187,6 +1225,8 @@ err_t wireguardif_init(struct netif *netif) {
 		log_e(TAG "netif or state is NULL: netif=%p, netif.state:%p", netif, netif ? netif->state : NULL);
 		result = ERR_ARG;
 	}
+	// The device keeps its own copy; wipe the decoded key from the stack
+	crypto_zero(private_key, sizeof(private_key));
 	return result;
 }
 

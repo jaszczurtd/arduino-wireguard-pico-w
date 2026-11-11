@@ -123,8 +123,8 @@ static inline void INNER_BLOCK(uint32_t *block) {
 //	state += working_state
 //	return serialize(state)
 // end
-static void chacha20_block(struct chacha20_ctx *ctx, uint8_t *stream) {
-	uint32_t working_state[16];
+// working_state belongs to the caller, which wipes it once the stream is done
+static void chacha20_block(struct chacha20_ctx *ctx, uint8_t *stream, uint32_t *working_state) {
 	int i;
 
 	for (i = 0; i < 16; ++i) {
@@ -140,18 +140,19 @@ static void chacha20_block(struct chacha20_ctx *ctx, uint8_t *stream) {
 
 void chacha20(struct chacha20_ctx *ctx, uint8_t *out, const uint8_t *in, uint32_t len) {
 	uint8_t output[CHACHA20_BLOCK_SIZE];
+	uint32_t working_state[16];
 	uint32_t i;
 
 	if (len) {
 		for (;;) {
-			chacha20_block(ctx, output);
+			chacha20_block(ctx, output, working_state);
 			// Word 12 is a block counter
 			ctx->state[12] = PLUSONE(ctx->state[12]);
 			if (len <= 64) {
 				for (i = 0;i < len;++i) {
 					out[i] = in[i] ^ output[i];
 			    }
-			    return;
+			    break;
 			}
 			for (i = 0;i < 64;++i) {
 				out[i] = in[i] ^ output[i];
@@ -160,6 +161,10 @@ void chacha20(struct chacha20_ctx *ctx, uint8_t *out, const uint8_t *in, uint32_
 			out += 64;
 			in += 64;
 		}
+
+		// Leave nothing sensitive on the stack
+		crypto_zero(working_state, sizeof(working_state));
+		crypto_zero(output, sizeof(output));
 	}
 }
 
@@ -223,4 +228,6 @@ void hchacha20(uint8_t *out, const uint8_t *nonce, const uint8_t *key) {
 	U32TO8_LITTLE(out + 20, state[13]);
 	U32TO8_LITTLE(out + 24, state[14]);
 	U32TO8_LITTLE(out + 28, state[15]);
+
+	crypto_zero(state, sizeof(state));
 }

@@ -19,9 +19,13 @@
 
 #include "wireguardif.h"
 #include "wireguard-platform.h"
+#include "wireguard_timestamp.h"
 #include "wg_port_pico.h"
 
 namespace {
+
+static_assert(WIREGUARD_TIMESTAMP_BYTES == WIREGUARDIF_TIMESTAMP_LEN,
+              "the clock and the engine use the same TAI64N layout");
 
 // State of the single tunnel. On Arduino-Pico lwIP runs in a background IRQ,
 // so everything below is touched only with the lwIP context lock held
@@ -32,6 +36,10 @@ struct netif *previous_default_netif = nullptr;
 uint8_t peer_index = WIREGUARDIF_INVALID_INDEX;
 bool netif_added = false;
 bool default_route_changed = false;
+// Server key of the running session, and the greatest initiation timestamp
+// accepted from a server key, kept across end()/begin() (wireguard_timestamp.h).
+char session_peer_key[WIREGUARD_TIMESTAMP_KEY_TEXT_CAPACITY];
+wireguard_timestamp_keeper_t kept_timestamp;
 
 // The handshake carries a TAI64N timestamp and the peer rejects an initiation
 // older than the last one it accepted. Arduino-Pico boots at the Unix epoch,
@@ -70,6 +78,10 @@ void teardown_locked() {
         netif_remove(wg_netif);
     }
     if (peer_index != WIREGUARDIF_INVALID_INDEX) {
+        uint8_t greatest[WIREGUARDIF_TIMESTAMP_LEN] = {};
+        if (wireguardif_peer_greatest_timestamp(wg_netif, peer_index, greatest, sizeof(greatest)) == ERR_OK) {
+            wireguard_timestamp_keep(&kept_timestamp, session_peer_key, greatest);
+        }
         (void)wireguardif_remove_peer(wg_netif, peer_index);
     }
     if (wg_netif->state != nullptr) {
@@ -77,6 +89,7 @@ void teardown_locked() {
     }
 
     memset(wg_netif, 0, sizeof(*wg_netif));
+    session_peer_key[0] = '\0';
     peer_index = WIREGUARDIF_INVALID_INDEX;
     netif_added = false;
     default_route_changed = false;
@@ -93,7 +106,8 @@ bool setup_locked(const ip4_addr_t &ipaddr,
                   uint16_t remotePeerPort,
                   const IPAddress &allowedIP,
                   const IPAddress &allowedMask,
-                  bool route_all) {
+                  bool route_all,
+                  const uint8_t (&now_tai64n)[WIREGUARDIF_TIMESTAMP_LEN]) {
     // Capture the current default netif (Wi-Fi) so we can bind UDP traffic there.
     previous_default_netif = netif_default;
     if (previous_default_netif == nullptr) {
@@ -136,6 +150,7 @@ bool setup_locked(const ip4_addr_t &ipaddr,
     peer.allowed_mask = allowedMask;
     peer.endpoint_ip = endpoint4;
     peer.endport_port = remotePeerPort;
+    wireguard_timestamp_seed(&kept_timestamp, now_tai64n, remotePeerPublicKey, peer.greatest_timestamp);
 
     err_t err = wireguardif_add_peer(wg_netif, &peer, &peer_index);
     if (err != ERR_OK) {
@@ -143,6 +158,7 @@ bool setup_locked(const ip4_addr_t &ipaddr,
         teardown_locked();
         return false;
     }
+    wireguard_timestamp_copy_key(session_peer_key, remotePeerPublicKey);
 
     netif_set_up(wg_netif);
     err = wireguardif_connect(wg_netif, peer_index);
@@ -188,12 +204,15 @@ bool WireGuard::beginAdvanced(const IPAddress &localIP,
     }
 
     // The peer compares handshake timestamps, so the wall clock has to be set
-    // (NTP) before the first handshake.
+    // (NTP) before the first handshake. The same clock sets the oldest server
+    // initiation this device accepts (wireguard_timestamp.h).
     const time_t now = time(nullptr);
     if (now < kMinimumWallClock) {
         log_e(TAG "wall clock not set (time()=%lu); sync NTP before begin()", (unsigned long)now);
         return false;
     }
+    uint8_t now_tai64n[WIREGUARDIF_TIMESTAMP_LEN];
+    wireguard_tai64n_now(now_tai64n);
 
     // Initialize platform glue (timers, RNG, etc.).
     wireguard_platform_init();
@@ -224,7 +243,7 @@ bool WireGuard::beginAdvanced(const IPAddress &localIP,
     {
         LWIPMutex lock;
         if (!setup_locked(ipaddr, netmask, privateKey, remotePeerPublicKey, endpoint4,
-                          remotePeerPort, allowedIP, allowedMask, route_all)) {
+                          remotePeerPort, allowedIP, allowedMask, route_all, now_tai64n)) {
             return false;
         }
     }

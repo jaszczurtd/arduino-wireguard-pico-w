@@ -164,6 +164,12 @@ struct wireguard_peer {
 	// The last time we sent an initiation message to this peer
 	uint32_t last_initiation_tx;
 
+	// When the last new secure session was created; meaningful only while
+	// has_session is set, which a peer reset clears. A flag instead of a zero
+	// timestamp, because the millisecond counter passes 0 when it wraps.
+	uint32_t last_session_millis;
+	bool has_session;
+
 	// last_tx and last_rx of data packets
 	uint32_t last_tx;
 	uint32_t last_rx;
@@ -191,6 +197,13 @@ struct wireguard_device {
 
 	// List of peers associated with this device
  	struct wireguard_peer peers[WIREGUARD_MAX_PEERS];
+
+	// Handshake initiated by a peer, from its received initiation to the
+	// response that turns it into a session. It is kept apart from each peer's
+	// own handshake, so an accepted initiation (a replayed one too) does not
+	// cancel the initiation this device has in flight. Filled and wiped while
+	// handling one received initiation.
+	struct wireguard_handshake remote_handshake;
 
 	bool valid;
 };
@@ -257,7 +270,9 @@ struct wireguard_peer *peer_lookup_by_peer_index(struct wireguard_device *device
 struct wireguard_peer *peer_lookup_by_receiver(struct wireguard_device *device, uint32_t receiver);
 struct wireguard_peer *peer_lookup_by_handshake(struct wireguard_device *device, uint32_t receiver);
 
-void wireguard_start_session(struct wireguard_peer *peer, bool initiator);
+// Derives the new session keys from 'handshake' (the peer's own handshake for
+// the initiator, the device's remote_handshake for the responder) and wipes it
+void wireguard_start_session(struct wireguard_peer *peer, struct wireguard_handshake *handshake, bool initiator);
 
 void keypair_update(struct wireguard_peer *peer, struct wireguard_keypair *received_keypair);
 void keypair_destroy(struct wireguard_keypair *keypair);

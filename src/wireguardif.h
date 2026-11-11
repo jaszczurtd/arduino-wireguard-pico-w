@@ -56,6 +56,9 @@ extern "C" {
 #define WIREGUARDIF_DEFAULT_PORT		(51820)
 #define WIREGUARDIF_KEEPALIVE_DEFAULT	(0xFFFF)
 
+// Length of a TAI64N handshake timestamp in bytes
+#define WIREGUARDIF_TIMESTAMP_LEN		(12)
+
 struct wireguardif_init_data {
 	// Required: the private key of this WireGuard network interface
 	const char *private_key;
@@ -69,8 +72,10 @@ struct wireguardif_peer {
 	const char *public_key;
 	// Optional pre-shared key (32 bytes) - make sure this is NULL if not to be used
 	const uint8_t *preshared_key;
-	// tai64n of largest timestamp we have seen during handshake to avoid replays
-	uint8_t greatest_timestamp[12];
+	// TAI64N of the greatest handshake timestamp seen from this peer, so old
+	// initiations cannot be replayed: restore the saved value, or the current
+	// time minus the tolerated clock difference (all zero accepts any).
+	uint8_t greatest_timestamp[WIREGUARDIF_TIMESTAMP_LEN];
 
 	// Allowed ip/netmask (can add additional later but at least one is required)
 	ip_addr_t allowed_ip;
@@ -142,6 +147,11 @@ err_t wireguardif_disconnect(struct netif *netif, u8_t peer_index);
 
 // Is the given peer "up"? A peer is up if it has a valid session key it can communicate with
 err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *current_ip, u16_t *current_port);
+
+// Copy the greatest handshake timestamp received from the given peer
+// (WIREGUARDIF_TIMESTAMP_LEN bytes) so it can be restored when the peer is
+// added again
+err_t wireguardif_peer_greatest_timestamp(struct netif *netif, u8_t peer_index, uint8_t *timestamp, size_t max_len);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -19,8 +19,10 @@ public:
      * Backward-compatible API:
      * - Allowed IPs: 0.0.0.0/0 (route everything through the tunnel)
      * Both begin() variants need the wall clock set (NTP) first: they return
-     * false and log an error while time() is before 2020-01-01. Any failure
-     * after that leaves the lwIP stack as it was, so begin() may be retried.
+     * false and log an error while time() is before 2020-01-01. The clock at
+     * begin() also sets the oldest handshake initiation of the server the
+     * device accepts (README, handshake rules). Any failure after that leaves
+     * the lwIP stack as it was, so begin() may be retried.
      */
     bool begin(const IPAddress& localIP,
                const char* privateKey,
@@ -42,7 +44,9 @@ public:
 
     /*
      * Restores the previous default netif, removes the interface and the peer,
-     * stops the lwIP timer and closes the UDP socket. begin() may be called again.
+     * stops the lwIP timer and closes the UDP socket. begin() may be called again
+     * and, with the same server key, does not accept again the handshake
+     * initiations this session has already accepted.
      */
     void end();
 

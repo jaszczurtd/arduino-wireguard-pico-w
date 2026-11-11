@@ -188,6 +188,7 @@ static void generate_peer_cookie(struct wireguard_device *device, uint8_t *cooki
 		wireguard_blake2s_update(&ctx, source_addr_port, source_length);
 	}
 	wireguard_blake2s_final(&ctx, cookie);
+	crypto_zero(&ctx, sizeof(ctx));
 }
 
 static void wireguard_mac(uint8_t *dst, const void *message, size_t len, const uint8_t *key, size_t keylen) {
@@ -195,11 +196,12 @@ static void wireguard_mac(uint8_t *dst, const void *message, size_t len, const u
 }
 
 static void wireguard_mac_key(uint8_t *key, const uint8_t *public_key, const uint8_t *label, size_t label_len) {
-	blake2s_ctx ctx;
-	blake2s_init(&ctx, WIREGUARD_SESSION_KEY_LEN, NULL, 0);
-	blake2s_update(&ctx, label, label_len);
-	blake2s_update(&ctx, public_key, WIREGUARD_PUBLIC_KEY_LEN);
-	blake2s_final(&ctx, key);
+	wireguard_blake2s_ctx ctx;
+	wireguard_blake2s_init(&ctx, WIREGUARD_SESSION_KEY_LEN, NULL, 0);
+	wireguard_blake2s_update(&ctx, label, label_len);
+	wireguard_blake2s_update(&ctx, public_key, WIREGUARD_PUBLIC_KEY_LEN);
+	wireguard_blake2s_final(&ctx, key);
+	crypto_zero(&ctx, sizeof(ctx));
 }
 
 static void wireguard_mix_hash(uint8_t *hash, const uint8_t *src, size_t src_len) {
@@ -208,6 +210,7 @@ static void wireguard_mix_hash(uint8_t *hash, const uint8_t *src, size_t src_len
 	wireguard_blake2s_update(&ctx, hash, WIREGUARD_HASH_LEN);
 	wireguard_blake2s_update(&ctx, src, src_len);
 	wireguard_blake2s_final(&ctx, hash);
+	crypto_zero(&ctx, sizeof(ctx));
 }
 
 static void wireguard_hmac(uint8_t *digest, const uint8_t *key, size_t key_len, const uint8_t *text, size_t text_len) {
@@ -224,6 +227,7 @@ static void wireguard_hmac(uint8_t *digest, const uint8_t *key, size_t key_len, 
 		wireguard_blake2s_init(&tctx, WIREGUARD_HASH_LEN, NULL, 0);
 		wireguard_blake2s_update(&tctx, key, key_len);
 		wireguard_blake2s_final(&tctx, tk);
+		crypto_zero(&tctx, sizeof(tctx));
 		key = tk;
 		key_len = WIREGUARD_HASH_LEN;
 	}
@@ -255,6 +259,11 @@ static void wireguard_hmac(uint8_t *digest, const uint8_t *key, size_t key_len, 
 	wireguard_blake2s_update(&ctx, k_opad, WIREGUARD_BLAKE2S_BLOCK_SIZE); // start with outer pad
 	wireguard_blake2s_update(&ctx, digest, WIREGUARD_HASH_LEN); // then results of 1st hash
 	wireguard_blake2s_final(&ctx, digest); // finish up 2nd pass
+
+	crypto_zero(k_ipad, sizeof(k_ipad));
+	crypto_zero(k_opad, sizeof(k_opad));
+	crypto_zero(tk, sizeof(tk));
+	crypto_zero(&ctx, sizeof(ctx));
 }
 
 static void wireguard_kdf1(uint8_t *tau1, const uint8_t *chaining_key, const uint8_t *data, size_t data_len) {
@@ -356,7 +365,10 @@ static uint32_t wireguard_generate_unique_index(struct wireguard_device *device)
 					(result == peer->prev_keypair.local_index) ||
 					(result == peer->next_keypair.local_index) ||
 					(result == peer->handshake.local_index);
-
+			if (existing) {
+				// This number is used by an earlier slot; generate a new one
+				break;
+			}
 		}
 	} while (existing);
 
@@ -430,23 +442,24 @@ void keypair_update(struct wireguard_peer *peer, struct wireguard_keypair *recei
 	}
 }
 
-static void add_new_keypair(struct wireguard_peer *peer, struct wireguard_keypair new_keypair) {
-	if (new_keypair.initiator) {
+// new_keypair is passed by pointer so no further copy of the session keys is
+// left on the stack
+static void add_new_keypair(struct wireguard_peer *peer, const struct wireguard_keypair *new_keypair) {
+	if (new_keypair->initiator) {
 		if (peer->next_keypair.valid) {
 			peer->prev_keypair = peer->next_keypair;
 			keypair_destroy(&peer->next_keypair);
 		} else  {
 			peer->prev_keypair = peer->curr_keypair;
 		}
-		peer->curr_keypair = new_keypair;
+		peer->curr_keypair = *new_keypair;
 	} else {
-		peer->next_keypair =  new_keypair;
+		peer->next_keypair = *new_keypair;
 		keypair_destroy(&peer->prev_keypair);
 	}
 }
 
-void wireguard_start_session(struct wireguard_peer *peer, bool initiator) {
-	struct wireguard_handshake *handshake = &peer->handshake;
+void wireguard_start_session(struct wireguard_peer *peer, struct wireguard_handshake *handshake, bool initiator) {
 	struct wireguard_keypair new_keypair;
 
 	crypto_zero(&new_keypair, sizeof(struct wireguard_keypair));
@@ -455,6 +468,8 @@ void wireguard_start_session(struct wireguard_peer *peer, bool initiator) {
 	new_keypair.remote_index = handshake->remote_index;
 
 	new_keypair.keypair_millis = wireguard_sys_now();
+	peer->last_session_millis = new_keypair.keypair_millis;
+	peer->has_session = true;
 	new_keypair.sending_valid = true;
 	new_keypair.receiving_valid = true;
 
@@ -482,7 +497,10 @@ void wireguard_start_session(struct wireguard_peer *peer, bool initiator) {
 	handshake->local_index = 0;
 	handshake->valid = false;
 
-	add_new_keypair(peer, new_keypair);
+	add_new_keypair(peer, &new_keypair);
+
+	// The session keys now live in the peer; wipe the stack copy
+	crypto_zero(&new_keypair, sizeof(new_keypair));
 }
 
 uint8_t wireguard_get_message_type(const uint8_t *data, size_t len) {
@@ -569,7 +587,9 @@ struct wireguard_peer *wireguard_process_initiation_message(struct wireguard_dev
 
 			peer = peer_lookup_by_pubkey(device, s);
 			if (peer) {
-				handshake = &peer->handshake;
+				// The responder state goes to the device, not to peer->handshake,
+				// which may hold this device's own initiation in flight
+				handshake = &device->remote_handshake;
 
 				// (Ci,k) := Kdf2(Ci,DH(Sprivi,Spubr))
 				wireguard_kdf2(chaining_key, key, chaining_key, peer->public_key_dh, WIREGUARD_PUBLIC_KEY_LEN);
@@ -583,14 +603,16 @@ struct wireguard_peer *wireguard_process_initiation_message(struct wireguard_dev
 
 					// Check that timestamp is increasing and we haven't had too many initiations (should only get one per peer every 5 seconds max?)
 					replay = (memcmp(t, peer->greatest_timestamp, WIREGUARD_TAI64N_LEN) <= 0); // tai64n is big endian so we can use memcmp to compare
-					rate_limit = (peer->last_initiation_rx - now) < (1000 / MAX_INITIATIONS_PER_SECOND);
+					// 0 means none received yet; the unsigned difference handles the
+					// wrap of the millisecond counter
+					rate_limit = (peer->last_initiation_rx != 0u) &&
+							((uint32_t)(now - peer->last_initiation_rx) < (1000u / MAX_INITIATIONS_PER_SECOND));
 
 					if (!replay && !rate_limit) {
 						// Success! Copy everything to peer
 						peer->last_initiation_rx = now;
 						if (memcmp(t, peer->greatest_timestamp, WIREGUARD_TAI64N_LEN) > 0) {
 							memcpy(peer->greatest_timestamp, t, WIREGUARD_TAI64N_LEN);
-							// TODO: Need to notify if the higher layers want to persist latest timestamp/nonce somewhere
 						}
 						memcpy(handshake->remote_ephemeral, e, WIREGUARD_PUBLIC_KEY_LEN);
 						memcpy(handshake->hash, hash, WIREGUARD_HASH_LEN);
@@ -633,7 +655,6 @@ bool wireguard_process_handshake_response(struct wireguard_device *device, struc
 	uint8_t chaining_key[WIREGUARD_HASH_LEN];
 	uint8_t e[WIREGUARD_PUBLIC_KEY_LEN];
 	uint8_t ephemeral_private[WIREGUARD_PUBLIC_KEY_LEN];
-	uint8_t static_private[WIREGUARD_PUBLIC_KEY_LEN];
 	uint8_t preshared_key[WIREGUARD_SESSION_KEY_LEN];
 	uint8_t dh_calculation[WIREGUARD_PUBLIC_KEY_LEN];
 	uint8_t tau[WIREGUARD_PUBLIC_KEY_LEN];
@@ -704,9 +725,9 @@ bool wireguard_process_handshake_response(struct wireguard_device *device, struc
 	crypto_zero(hash, sizeof(hash));
 	crypto_zero(chaining_key, sizeof(chaining_key));
 	crypto_zero(ephemeral_private, sizeof(ephemeral_private));
-	crypto_zero(static_private, sizeof(static_private));
 	crypto_zero(preshared_key, sizeof(preshared_key));
 	crypto_zero(tau, sizeof(tau));
+	crypto_zero(dh_calculation, sizeof(dh_calculation));
 
 	return result;
 }
@@ -822,7 +843,7 @@ bool wireguard_create_handshake_initiation(struct wireguard_device *device, stru
 }
 
 bool wireguard_create_handshake_response(struct wireguard_device *device, struct wireguard_peer *peer, struct message_handshake_response *dst) {
-	struct wireguard_handshake *handshake = &peer->handshake;
+	struct wireguard_handshake *handshake = &device->remote_handshake;
 	uint8_t key[WIREGUARD_SESSION_KEY_LEN];
 	uint8_t dh_calculation[WIREGUARD_PUBLIC_KEY_LEN];
 	uint8_t tau[WIREGUARD_HASH_LEN];
@@ -1006,8 +1027,9 @@ bool wireguard_base64_decode(const char *str, uint8_t *out, size_t *outlen) {
 			// This is '=' padding at end of string - decrease the number of bytes to write
 			bits = 0;
 			byte_count--;
-			if (byte_count < 0) {
-				// Too much padding!
+			if (byte_count < 1) {
+				// Too much padding: a 4-character block has at most two '=' and always
+				// decodes to at least one byte
 				result = false;
 				break;
 			}

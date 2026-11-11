@@ -14,11 +14,12 @@ The goal of the port is to keep the original API as intact as possible, while re
 The original library targets ESP32 and depends on ESP-IDF pieces. For Pico W (Arduino-Pico + lwIP) this port replaces or adapts the following:
 
 - **ESP logging** (`ESP_LOGx`) replaced with a small `Serial` logger that is safe to call from lwIP callbacks (see [Logging](#logging)).
-- **`tcpip_adapter_*`** (ESP-IDF networking glue) replaced with a Pico/lwIP shim.
+- **`tcpip_adapter_*`** (ESP-IDF networking layer) replaced with a Pico/lwIP shim.
 - **Netif lookup** simplified: on Pico W the STA interface maps to **lwIP's default netif** (`netif_default`).
-- **Platform glue** moved into `src/wg_port_pico.h` and `src/wireguard-platform.c`.
+- **Platform code** moved into `src/wg_port_pico.h` and `src/wireguard-platform.c`.
 - **Build fixes** for ARM GCC (RP2040 toolchain), including a warning fix in `x25519.c` (treat `a24` as an 8-limb field element to avoid false-positive overread warnings).
 - **Data path**: encapsulated UDP leaves explicitly through the Wi-Fi interface (so full-tunnel routing cannot loop back into the tunnel), received chained `pbuf`s are coalesced before parsing, the anti-replay window is an RFC 6479 style ring of 8192 counters that accepts counter zero once, and received inner packets are checked against AllowedIPs by their source address.
+- **Handshake and endpoint protection**: the fixes of the wireguard-lwip advisory GHSA-7grw-r329-8g8c are included; see [Handshake, endpoint and session rules](#handshake-endpoint-and-session-rules).
 
 ## Requirements
 
@@ -27,7 +28,7 @@ The original library targets ESP32 and depends on ESP-IDF pieces. For Pico W (Ar
 - Arduino-Pico core (Earle Philhower)
 - WiFi enabled (CYW43)
 - IPv4 networking (WireGuard endpoint by IPv4 literal or hostname is supported)
-- Wall clock synchronized (NTP) before `begin()`; the handshake carries a timestamp
+- Wall clock synchronized (NTP) before `begin()`; the handshake carries a timestamp and the clock also sets the oldest server initiation the device accepts
 
 ## Usage (example)
 
@@ -161,6 +162,8 @@ void loop() {
 - `end()`
   - Restores the previous default netif, removes the interface and the peer,
     stops the lwIP timer and closes the UDP socket. `begin()` may be called again.
+  - Keeps the newest handshake timestamp accepted from the server, so a later
+    `begin()` with the same server key does not accept that initiation again.
 
 - `is_initialized()`
   - Returns whether WireGuard interface setup has completed.
@@ -177,6 +180,35 @@ void loop() {
   - The first call after `begin()` always sends; later calls within
     `minIntervalMs` return `true` without sending. Returns `false` when
     `probePort` is 0 or the probe could not be sent.
+
+## Handshake, endpoint and session rules
+
+The library includes the fixes of the wireguard-lwip advisory
+[GHSA-7grw-r329-8g8c](https://github.com/smartalock/wireguard-lwip/security/advisories/GHSA-7grw-r329-8g8c):
+endpoint redirection by replayed transport packets or forged cookie replies,
+an out-of-bounds read on short decrypted packets, replayed handshake
+initiations, an ineffective initiation rate limit, session state that never
+expired and key material left on the stack. What this means for a sketch:
+
+- The peer endpoint follows the source address of two kinds of packets only:
+  authenticated, non-replayed data packets and keep-alives, and the valid
+  response to the device's own handshake initiation. A cookie reply only
+  stores the cookie.
+- A handshake initiation from the server gets its response at its source
+  address. It leaves the endpoint as it is and does not cancel a handshake the
+  device has already started, so a replayed initiation can neither redirect the
+  tunnel nor stall its handshake.
+- `begin()` accepts a server initiation only when its timestamp is newer than
+  the wall clock at `begin()` minus 120 s and newer than every initiation
+  accepted before from the same server key, also before `end()`. That limit
+  does not follow the clock later on, and a reset of the board clears the
+  remembered initiations. The device starts its own handshakes, so the tunnel
+  comes up even when the server's clock lags behind.
+- After 540 s without a new session the tunnel wipes its keys and handshake
+  state and goes back to the configured endpoint. Session keys that are
+  180 s old no longer send or receive and are destroyed.
+- Only IPv4 travels through the tunnel; inner packets of any other version are
+  dropped.
 
 ## Logging
 
@@ -211,15 +243,20 @@ level prefix: `WG_LOG_LINE_MAX` (default 128 bytes).
 
 - `src/wg_port_pico.h`, `src/wg_port_pico.cpp` – Pico W / lwIP compatibility layer (ESP-IDF replacements, IRQ-safe logger)
 - `src/wireguard-platform.c` – platform init and helpers used by the core WireGuard implementation
-- `src/wireguard_replay.h`, `src/wireguard_pbuf.h`, `src/wireguard_allowed_ip.h` – anti-replay window, contiguous `pbuf` helper and the AllowedIPs source check
+- `src/wireguard_replay.h`, `src/wireguard_pbuf.h`, `src/wireguard_allowed_ip.h`, `src/wireguard_timestamp.h` – anti-replay window, contiguous `pbuf` helper, the AllowedIPs source check and the oldest server initiation a new session accepts
 
 ## Tests
 
-`extras/tests/host/run.sh` builds the helper headers above and the crypto primitives
-against the lwIP sources bundled with the installed Arduino-Pico core and runs
-their tests on the host (`g++`, no board needed; BLAKE2s, X25519 and
-ChaCha20-Poly1305 are checked against known vectors). Set `LWIP_DIR` to use
-another lwIP checkout.
+`extras/tests/host/run.sh` builds and runs two host programs against the lwIP
+sources bundled with the installed Arduino-Pico core (`gcc`/`g++`, no board
+needed). `test_wireguard_helpers` covers the helper headers above and the
+crypto primitives; BLAKE2s, X25519 and ChaCha20-Poly1305 are checked against
+known vectors. `test_wireguardif_protocol` runs two engines of the library, a
+client and a server, on the real lwIP core and hands their datagrams to the
+other side with a chosen source address, the way an observer of the traffic
+could: replayed transport packets and initiations, a forged cookie reply, short
+decrypted packets, the initiation rate limit and the expiry of sessions. Set
+`LWIP_DIR` to use another lwIP checkout.
 
 `extras/tests/hardware/wg_services` is a sketch that exercises split and full tunnel,
 the endpoint given as a name, WiFi loss under a tunnel and a soak across key

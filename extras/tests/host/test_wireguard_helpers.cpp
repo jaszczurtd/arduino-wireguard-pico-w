@@ -2,6 +2,7 @@
 //   wireguard_replay.h      anti-replay ring window
 //   wireguard_pbuf.h        contiguous pbuf for the message parsers
 //   wireguard_allowed_ip.h  AllowedIPs check on the inner source address
+//   wireguard_timestamp.h   greatest handshake timestamp of a new peer
 //   crypto.c, crypto/refc/  BLAKE2s, X25519 and ChaCha20-Poly1305 vectors
 // Built by run.sh against real lwIP sources (pbuf, heap), no board needed.
 
@@ -17,6 +18,7 @@ extern "C" {
 #include "wireguard_allowed_ip.h"
 #include "wireguard_pbuf.h"
 #include "wireguard_replay.h"
+#include "wireguard_timestamp.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -206,6 +208,107 @@ static void test_allowed_ip_default_route_and_null_arguments() {
   CHECK(!wireguard_ipv4_source_is_allowed(&peer, nullptr));
 }
 
+// ---- greatest handshake timestamp of a new peer ----------------------------
+
+// The clock reads bytes 0..11: 0x0001020304050607 seconds and 0x08090a0b
+// nanoseconds. 120 s earlier, nanoseconds cleared:
+static const uint8_t kClockNow[WIREGUARD_TIMESTAMP_BYTES] = {
+    0x00u, 0x01u, 0x02u, 0x03u, 0x04u, 0x05u,
+    0x06u, 0x07u, 0x08u, 0x09u, 0x0au, 0x0bu};
+static const uint8_t kClockFloor[WIREGUARD_TIMESTAMP_BYTES] = {
+    0x00u, 0x01u, 0x02u, 0x03u, 0x04u, 0x05u, 0x05u, 0x8fu, 0u, 0u, 0u, 0u};
+
+// A fresh peer would accept one replayed initiation of the server and move
+// its endpoint (GHSA-7grw-r329-8g8c issue 4): without a kept value the peer
+// starts from the clock minus the tolerance.
+static void test_timestamp_seed_starts_from_the_clock_floor() {
+  wireguard_timestamp_keeper_t kept = {};
+  uint8_t seed[WIREGUARD_TIMESTAMP_BYTES];
+
+  wireguard_timestamp_seed(&kept, kClockNow, "server-a", seed);
+  CHECK(std::memcmp(seed, kClockFloor, sizeof(seed)) == 0);
+  wireguard_timestamp_seed(nullptr, kClockNow, "server-a", seed);
+  CHECK(std::memcmp(seed, kClockFloor, sizeof(seed)) == 0);
+
+  // A clock that is not past the tolerance accepts any initiation.
+  uint8_t early[WIREGUARD_TIMESTAMP_BYTES] = {};
+  early[7] = 120u;
+  early[11] = 1u;
+  const uint8_t zero[WIREGUARD_TIMESTAMP_BYTES] = {};
+  wireguard_timestamp_seed(&kept, early, "server-a", seed);
+  CHECK(std::memcmp(seed, zero, sizeof(seed)) == 0);
+  early[7] = 121u;
+  wireguard_timestamp_seed(&kept, early, "server-a", seed);
+  CHECK(seed[7] == 1u);
+  CHECK(std::memcmp(seed, zero, 7u) == 0);
+  CHECK(std::memcmp(seed + 8, zero, 4u) == 0);
+}
+
+// end() keeps the greatest timestamp the engine accepted, so reconnecting to
+// the same server does not reopen the replay window; another server key, or
+// a kept value below the clock floor, starts from the floor.
+static void test_timestamp_keep_applies_to_the_same_server_key_only() {
+  const uint8_t accepted[WIREGUARD_TIMESTAMP_BYTES] = {
+      0x00u, 0x01u, 0x02u, 0x03u, 0x04u, 0x05u, 0x06u, 0x00u, 0u, 0u, 0u, 5u};
+  const uint8_t stale[WIREGUARD_TIMESTAMP_BYTES] = {
+      0x00u, 0x01u, 0x02u, 0x03u, 0x04u, 0x05u, 0x05u, 0x80u, 0u, 0u, 0u, 0u};
+  wireguard_timestamp_keeper_t kept = {};
+  uint8_t seed[WIREGUARD_TIMESTAMP_BYTES];
+
+  wireguard_timestamp_keep(&kept, "server-a", accepted);
+  wireguard_timestamp_seed(&kept, kClockNow, "server-a", seed);
+  CHECK(std::memcmp(seed, accepted, sizeof(seed)) == 0);
+  wireguard_timestamp_seed(&kept, kClockNow, "server-b", seed);
+  CHECK(std::memcmp(seed, kClockFloor, sizeof(seed)) == 0);
+
+  wireguard_timestamp_keep(&kept, "server-b", stale);
+  wireguard_timestamp_seed(&kept, kClockNow, "server-b", seed);
+  CHECK(std::memcmp(seed, kClockFloor, sizeof(seed)) == 0);
+  // The newer session replaced the kept value of server-a.
+  wireguard_timestamp_seed(&kept, kClockNow, "server-a", seed);
+  CHECK(std::memcmp(seed, kClockFloor, sizeof(seed)) == 0);
+}
+
+// A session without a key (the peer was never added) keeps nothing, and a
+// key longer than a base64 public key is never stored.
+static void test_timestamp_keep_ignores_missing_and_oversized_keys() {
+  const uint8_t accepted[WIREGUARD_TIMESTAMP_BYTES] = {
+      0x00u, 0x01u, 0x02u, 0x03u, 0x04u, 0x05u, 0x06u, 0x00u, 0u, 0u, 0u, 5u};
+  const uint8_t other[WIREGUARD_TIMESTAMP_BYTES] = {
+      0x00u, 0x01u, 0x02u, 0x03u, 0x04u, 0x05u, 0x07u, 0x00u, 0u, 0u, 0u, 0u};
+  wireguard_timestamp_keeper_t kept = {};
+  uint8_t seed[WIREGUARD_TIMESTAMP_BYTES];
+
+  wireguard_timestamp_keep(&kept, "", accepted);
+  wireguard_timestamp_keep(nullptr, "server-a", accepted);
+  CHECK(kept.peer_key[0] == '\0');
+  wireguard_timestamp_seed(&kept, kClockNow, "", seed);
+  CHECK(std::memcmp(seed, kClockFloor, sizeof(seed)) == 0);
+
+  // Neither replaces what is kept for a real key.
+  wireguard_timestamp_keep(&kept, "server-a", accepted);
+  wireguard_timestamp_keep(&kept, "", other);
+  wireguard_timestamp_keep(&kept, nullptr, other);
+  wireguard_timestamp_seed(&kept, kClockNow, "server-a", seed);
+  CHECK(std::memcmp(seed, accepted, sizeof(seed)) == 0);
+
+  // 44 characters (a base64 public key) fit, 45 do not.
+  char longest[WIREGUARD_TIMESTAMP_KEY_TEXT_CAPACITY];
+  std::memset(longest, 'A', sizeof(longest) - 1u);
+  longest[sizeof(longest) - 1u] = '\0';
+  wireguard_timestamp_keep(&kept, longest, accepted);
+  wireguard_timestamp_seed(&kept, kClockNow, longest, seed);
+  CHECK(std::memcmp(seed, accepted, sizeof(seed)) == 0);
+
+  char oversized[WIREGUARD_TIMESTAMP_KEY_TEXT_CAPACITY + 1u];
+  std::memset(oversized, 'B', sizeof(oversized) - 1u);
+  oversized[sizeof(oversized) - 1u] = '\0';
+  wireguard_timestamp_keep(&kept, oversized, accepted);
+  CHECK(kept.peer_key[0] == '\0');
+  wireguard_timestamp_seed(&kept, kClockNow, oversized, seed);
+  CHECK(std::memcmp(seed, kClockFloor, sizeof(seed)) == 0);
+}
+
 // ---- crypto primitives ----------------------------------------------------
 
 static bool hex_to_bytes(const char *hex, uint8_t *out, size_t out_len) {
@@ -326,6 +429,9 @@ int main() {
   test_pbuf_rejects_null_and_frees_when_coalescing_fails();
   test_allowed_ip_checks_inner_source_not_destination();
   test_allowed_ip_default_route_and_null_arguments();
+  test_timestamp_seed_starts_from_the_clock_floor();
+  test_timestamp_keep_applies_to_the_same_server_key_only();
+  test_timestamp_keep_ignores_missing_and_oversized_keys();
 
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
