@@ -20,6 +20,8 @@ The original library targets ESP32 and depends on ESP-IDF pieces. For Pico W (Ar
 - **Build fixes** for ARM GCC (RP2040 toolchain), including a warning fix in `x25519.c` (treat `a24` as an 8-limb field element to avoid false-positive overread warnings).
 - **Data path**: encapsulated UDP leaves explicitly through the Wi-Fi interface (so full-tunnel routing cannot loop back into the tunnel), received chained `pbuf`s are coalesced before parsing, the anti-replay window is an RFC 6479 style ring of 8192 counters that accepts counter zero once, and received inner packets are checked against AllowedIPs by their source address.
 - **Handshake and endpoint protection**: the fixes of the wireguard-lwip advisory GHSA-7grw-r329-8g8c are included; see [Handshake, endpoint and session rules](#handshake-endpoint-and-session-rules).
+- **Key material** comes from the Pico SDK `pico_rand` generator, which mixes the ring oscillator, the timer and a bus counter into a seeded PRNG, instead of sampling the ring oscillator directly.
+- **Persistent keepalive** is on by default (25 s): the tunnel sends an authenticated keepalive on an idle session so a NAT mapping in front of the device does not expire. A preshared key and the keepalive interval are optional arguments of `begin()`; see [Preshared key and keepalive](#preshared-key-and-keepalive).
 
 ## Requirements
 
@@ -145,19 +147,25 @@ void loop() {
 
 ## API summary
 
-- `begin(localIP, privateKey, remotePeerAddress, remotePeerPublicKey, remotePeerPort)`
+- `begin(localIP, privateKey, remotePeerAddress, remotePeerPublicKey, remotePeerPort, presharedKey = nullptr, persistentKeepaliveSeconds = 25)`
   - Backward-compatible mode.
   - Uses full-tunnel routing (`AllowedIPs = 0.0.0.0/0`): the WireGuard interface
     becomes lwIP's default route, so every connection opened afterwards, DNS
     included, goes through the tunnel. Resolve names and sync NTP before `begin()`.
 
-- `beginAdvanced(localIP, privateKey, remotePeerAddress, remotePeerPublicKey, remotePeerPort, allowedIp, allowedMask)`
+- `beginAdvanced(localIP, privateKey, remotePeerAddress, remotePeerPublicKey, remotePeerPort, allowedIp, allowedMask, presharedKey = nullptr, persistentKeepaliveSeconds = 25)`
   - Split-tunnel mode.
   - Routes only `allowedIp/allowedMask` through WireGuard.
 
 - Both `begin()` variants return `false` and log an error while the wall clock
   is before 2020-01-01 (NTP not done yet). Any later failure, for example an
   invalid peer key, leaves the lwIP stack as it was, so `begin()` can be retried.
+
+- `presharedKey` is the optional base64 text of the peer's 32-byte preshared
+  key; `nullptr` or an empty string means none. `persistentKeepaliveSeconds`
+  sets the keepalive interval, 0 disables it, up to 180. A preshared key that
+  does not decode to 32 bytes, or a keepalive above 180, makes `begin()` return
+  `false` before it touches lwIP (see [Preshared key and keepalive](#preshared-key-and-keepalive)).
 
 - `end()`
   - Restores the previous default netif, removes the interface and the peer,
@@ -180,6 +188,24 @@ void loop() {
   - The first call after `begin()` always sends; later calls within
     `minIntervalMs` return `true` without sending. Returns `false` when
     `probePort` is 0 or the probe could not be sent.
+
+## Preshared key and keepalive
+
+A preshared key is an optional extra secret shared with the peer, on top of
+the public keys. Pass its base64 text to `begin()` or `beginAdvanced()` and the
+peer must carry the same one, or the handshake does not complete. An absent or
+empty key keeps the key-pair-only handshake. A key that does not decode to 32
+bytes makes `begin()` return `false` rather than start without it, so a tunnel
+never comes up without a key the peer requires.
+
+WireGuard sends nothing on an idle session, so a NAT mapping in front of the
+device expires after a minute or two and the peer can no longer reach it. The
+persistent keepalive sends an empty, authenticated packet after
+`persistentKeepaliveSeconds` without traffic, which keeps the mapping open and
+the session renewed on its own. The default is 25 s, the value the WireGuard
+documentation recommends behind NAT. Pass 0 to disable it, for example when
+the device only ever starts the traffic itself. The interval does not change
+the rekey timing: a session still renews on the protocol's own schedule.
 
 ## Handshake, endpoint and session rules
 
@@ -244,6 +270,7 @@ level prefix: `WG_LOG_LINE_MAX` (default 128 bytes).
 - `src/wg_port_pico.h`, `src/wg_port_pico.cpp` – Pico W / lwIP compatibility layer (ESP-IDF replacements, IRQ-safe logger)
 - `src/wireguard-platform.c` – platform init and helpers used by the core WireGuard implementation
 - `src/wireguard_replay.h`, `src/wireguard_pbuf.h`, `src/wireguard_allowed_ip.h`, `src/wireguard_timestamp.h` – anti-replay window, contiguous `pbuf` helper, the AllowedIPs source check and the oldest server initiation a new session accepts
+- `src/wireguard_keepalive.h` – persistent keepalive default and range
 
 ## Tests
 
@@ -255,7 +282,8 @@ known vectors. `test_wireguardif_protocol` runs two engines of the library, a
 client and a server, on the real lwIP core and hands their datagrams to the
 other side with a chosen source address, the way an observer of the traffic
 could: replayed transport packets and initiations, a forged cookie reply, short
-decrypted packets, the initiation rate limit and the expiry of sessions. Set
+decrypted packets, the initiation rate limit, the expiry of sessions,
+preshared keys and the rekey thresholds. Set
 `LWIP_DIR` to use another lwIP checkout.
 
 `extras/tests/hardware/wg_services` is a sketch that exercises split and full tunnel,

@@ -89,7 +89,7 @@ static bool wifi_join(uint32_t budget_ms) {
 
 static bool begin_split(const char *endpoint) {
   return wg.beginAdvanced(WG_LOCAL_IP, WG_PRIV, endpoint, WG_PEER_PUB, WG_PORT,
-                          WG_ALLOWED_IP, WG_ALLOWED_MASK);
+                          WG_ALLOWED_IP, WG_ALLOWED_MASK, WG_PRESHARED_KEY);
 }
 
 // Waits for peerUp() while kicking the handshake; ms to up or -1.
@@ -252,7 +252,7 @@ static void split_cycle(int n) {
 
 static void full_tunnel() {
   char detail[64];
-  const bool ok = wg.begin(WG_LOCAL_IP, WG_PRIV, WG_ENDPOINT, WG_PEER_PUB, WG_PORT);
+  const bool ok = wg.begin(WG_LOCAL_IP, WG_PRIV, WG_ENDPOINT, WG_PEER_PUB, WG_PORT, WG_PRESHARED_KEY);
   const long up = ok ? wait_up(10000) : -1;
   snprintf(detail, sizeof(detail), "begin=%d up_ms=%ld", ok ? 1 : 0, up);
   check("full_handshake", up >= 0, detail);

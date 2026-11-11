@@ -8,6 +8,8 @@
 #include <Arduino.h>
 #include <IPAddress.h>
 
+#include "wireguard_keepalive.h"
+
 class WireGuard {
 private:
     bool _is_initialized = false;
@@ -23,16 +25,27 @@ public:
      * begin() also sets the oldest handshake initiation of the server the
      * device accepts (README, handshake rules). Any failure after that leaves
      * the lwIP stack as it was, so begin() may be retried.
+     * - presharedKey: optional base64 text of the 32-byte preshared key of
+     *   the peer; nullptr or an empty string means none. Text that does not
+     *   decode to 32 bytes makes begin() return false.
+     * - persistentKeepaliveSeconds: seconds between keepalive packets on an
+     *   idle session, 0 disables them, at most
+     *   WIREGUARD_KEEPALIVE_MAX_SECONDS (180). The default of 25 s suits a
+     *   device behind NAT (wireguard_keepalive.h). A larger value makes
+     *   begin() return false before it touches lwIP.
      */
     bool begin(const IPAddress& localIP,
                const char* privateKey,
                const char* remotePeerAddress,
                const char* remotePeerPublicKey,
-               uint16_t remotePeerPort);
+               uint16_t remotePeerPort,
+               const char* presharedKey = nullptr,
+               uint16_t persistentKeepaliveSeconds = WIREGUARD_KEEPALIVE_DEFAULT_SECONDS);
 
     /*
      * Configurable API:
      * - allowedIp/allowedMask: what should be routed via WireGuard (e.g. 10.8.0.0/24)
+     * - presharedKey, persistentKeepaliveSeconds: as in begin()
      */
     bool beginAdvanced(const IPAddress& localIP,
                        const char* privateKey,
@@ -40,7 +53,9 @@ public:
                        const char* remotePeerPublicKey,
                        uint16_t remotePeerPort,
                        const IPAddress& allowedIp,
-                       const IPAddress& allowedMask);
+                       const IPAddress& allowedMask,
+                       const char* presharedKey = nullptr,
+                       uint16_t persistentKeepaliveSeconds = WIREGUARD_KEEPALIVE_DEFAULT_SECONDS);
 
     /*
      * Restores the previous default netif, removes the interface and the peer,

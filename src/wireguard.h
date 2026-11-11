@@ -49,6 +49,10 @@
 #include "wireguard-platform.h"
 #include "wireguard_replay.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // tai64n contains 64-bit seconds and 32-bit nano offset (12 bytes)
 #define WIREGUARD_TAI64N_LEN		(12)
 // Auth algorithm is chacha20pol1305 which is 128bit (16 byte) authenticator
@@ -301,5 +305,9 @@ bool wireguard_decrypt_packet(uint8_t *dst, const uint8_t *src, size_t src_len, 
 
 bool wireguard_base64_decode(const char *str, uint8_t *out, size_t *outlen);
 bool wireguard_base64_encode(const uint8_t *in, size_t inlen, char *out, size_t *outlen);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
 
 #endif /* _WIREGUARD_H_ */

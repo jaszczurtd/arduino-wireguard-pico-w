@@ -125,6 +125,18 @@ static const char kClientPrivateKey[] =
 static const char kServerPrivateKey[] =
     "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=";
 
+// Two distinct 32-byte preshared keys for the PSK tests.
+static const uint8_t kPresharedKey[32] = {
+    0x33u, 0x33u, 0x33u, 0x33u, 0x33u, 0x33u, 0x33u, 0x33u,
+    0x33u, 0x33u, 0x33u, 0x33u, 0x33u, 0x33u, 0x33u, 0x33u,
+    0x33u, 0x33u, 0x33u, 0x33u, 0x33u, 0x33u, 0x33u, 0x33u,
+    0x33u, 0x33u, 0x33u, 0x33u, 0x33u, 0x33u, 0x33u, 0x33u};
+static const uint8_t kPresharedKeyOther[32] = {
+    0x44u, 0x44u, 0x44u, 0x44u, 0x44u, 0x44u, 0x44u, 0x44u,
+    0x44u, 0x44u, 0x44u, 0x44u, 0x44u, 0x44u, 0x44u, 0x44u,
+    0x44u, 0x44u, 0x44u, 0x44u, 0x44u, 0x44u, 0x44u, 0x44u,
+    0x44u, 0x44u, 0x44u, 0x44u, 0x44u, 0x44u, 0x44u, 0x44u};
+
 u32_t sys_now(void) { return s_now_ms; }
 
 uint32_t wireguard_sys_now(void) { return s_now_ms; }
@@ -255,18 +267,20 @@ static void start_node(struct netif *netif, struct wireguardif_init_data *init,
 static void add_peer(struct netif *netif, const char *public_key,
                      const ip_addr_t *endpoint, u16_t endpoint_port,
                      uint8_t allowed_host, uint8_t allowed_prefix_byte,
-                     const uint8_t *greatest_timestamp) {
+                     const uint8_t *greatest_timestamp,
+                     const uint8_t *preshared_key, uint16_t keep_alive) {
   struct wireguardif_peer peer;
   u8_t index = WIREGUARDIF_INVALID_INDEX;
   memset(&peer, 0, sizeof(peer));
   peer.public_key = public_key;
+  peer.preshared_key = preshared_key;
   IP_ADDR4(&peer.allowed_ip, 10, 8, 0, allowed_host);
   IP_ADDR4(&peer.allowed_mask, 255, 255, 255, allowed_prefix_byte);
   if (endpoint != NULL) {
     peer.endpoint_ip = *endpoint;
     peer.endport_port = endpoint_port;
   }
-  peer.keep_alive = 0u; // no keep-alive traffic of its own in these tests
+  peer.keep_alive = keep_alive;
   if (greatest_timestamp != NULL) {
     memcpy(peer.greatest_timestamp, greatest_timestamp,
            sizeof(peer.greatest_timestamp));
@@ -287,8 +301,11 @@ static char s_client_public_key[64];
 static char s_server_public_key[64];
 
 // The server, with or without the client's configured endpoint, and the
-// client, configured to connect to the server.
-static void start_pair(bool server_knows_client_endpoint) {
+// client, configured to connect to the server. Each side takes its own
+// preshared key (NULL for none) and persistent keepalive.
+static void start_pair_ex(bool server_knows_client_endpoint,
+                          const uint8_t *client_psk, uint16_t client_keepalive,
+                          const uint8_t *server_psk, uint16_t server_keepalive) {
   start_node(&s_client, &s_client_init, kClientPrivateKey, kClientPort, 2u);
   start_node(&s_server, &s_server_init, kServerPrivateKey, kServerPort, 1u);
   encode_public_key(&s_client, s_client_public_key,
@@ -296,11 +313,16 @@ static void start_pair(bool server_knows_client_endpoint) {
   encode_public_key(&s_server, s_server_public_key,
                     sizeof(s_server_public_key));
   add_peer(&s_client, s_server_public_key, &s_server_address, kServerPort, 0u,
-           0u, NULL);
+           0u, NULL, client_psk, client_keepalive);
   add_peer(&s_server, s_client_public_key,
            server_knows_client_endpoint ? &s_client_address : NULL,
-           server_knows_client_endpoint ? kClientPort : 0u, 2u, 255u, NULL);
+           server_knows_client_endpoint ? kClientPort : 0u, 2u, 255u, NULL,
+           server_psk, server_keepalive);
   TEST_ASSERT_EQUAL(ERR_OK, wireguardif_connect(&s_client, 0u));
+}
+
+static void start_pair(bool server_knows_client_endpoint) {
+  start_pair_ex(server_knows_client_endpoint, NULL, 0u, NULL, 0u);
 }
 
 // The client's next initiation, as it went out on the wire.
@@ -415,6 +437,16 @@ static size_t responses_since(size_t first) {
     }
   }
   return responses;
+}
+
+static size_t initiations_since(size_t first) {
+  size_t initiations = 0u;
+  for (size_t index = first; index < s_sent_count; ++index) {
+    if (message_type(&s_sent[index]) == MESSAGE_HANDSHAKE_INITIATION) {
+      ++initiations;
+    }
+  }
+  return initiations;
 }
 
 static bool all_zero(const void *data, size_t size) {
@@ -572,7 +604,7 @@ test_a_restored_greatest_timestamp_rejects_a_replayed_initiation(void) {
   // Restart with the saved value: the replay is ignored.
   stop_node(&s_server);
   start_node(&s_server, &s_server_init, kServerPrivateKey, kServerPort, 1u);
-  add_peer(&s_server, s_client_public_key, NULL, 0u, 2u, 255u, greatest);
+  add_peer(&s_server, s_client_public_key, NULL, 0u, 2u, 255u, greatest, NULL, 0u);
   s_now_ms += 60000u;
   first = s_sent_count;
   deliver(&s_server, &initiation, &s_attacker_address, kAttackerPort);
@@ -583,7 +615,7 @@ test_a_restored_greatest_timestamp_rejects_a_replayed_initiation(void) {
   // still does not become the endpoint.
   stop_node(&s_server);
   start_node(&s_server, &s_server_init, kServerPrivateKey, kServerPort, 1u);
-  add_peer(&s_server, s_client_public_key, NULL, 0u, 2u, 255u, NULL);
+  add_peer(&s_server, s_client_public_key, NULL, 0u, 2u, 255u, NULL, NULL, 0u);
   first = s_sent_count;
   deliver(&s_server, &initiation, &s_attacker_address, kAttackerPort);
   (void)response_to(first, &s_attacker_address, kAttackerPort);
@@ -774,6 +806,93 @@ static void test_expired_previous_keypairs_are_destroyed(void) {
                     wireguardif_peer_is_up(&s_client, 0u, NULL, NULL));
 }
 
+// A preshared key is mixed into the handshake; two peers that share the same
+// one complete it and carry traffic as without one.
+static void test_peers_with_the_same_preshared_key_complete_the_handshake(void) {
+  start_pair_ex(false, kPresharedKey, 0u, kPresharedKey, 0u);
+  (void)handshake_from(&s_client_address, kClientPort);
+  const u32_t received_before = lwip_stats.ip.recv;
+  const datagram_t data = client_sends_inner_packet();
+  deliver(&s_server, &data, &s_client_address, kClientPort);
+  TEST_ASSERT_EQUAL(received_before + 1u, lwip_stats.ip.recv);
+}
+
+// The client (initiator) consumes the response only when its own preshared key
+// matches the server's; otherwise it decrypts nothing, sends no keep-alive and
+// keeps no session, so the mismatch cannot complete, also when only one side
+// carries a key.
+static void drive_preshared_key_mismatch(const uint8_t *client_psk,
+                                         const uint8_t *server_psk) {
+  start_pair_ex(false, client_psk, 0u, server_psk, 0u);
+  const datagram_t initiation = client_initiation();
+  size_t first = s_sent_count;
+  deliver(&s_server, &initiation, &s_client_address, kClientPort);
+  const datagram_t response = response_to(first, &s_client_address, kClientPort);
+  first = s_sent_count;
+  deliver(&s_client, &response, &s_server_address, kServerPort);
+  TEST_ASSERT_EQUAL(first, s_sent_count);
+  TEST_ASSERT_FALSE(peer_of(&s_client)->curr_keypair.valid);
+  stop_node(&s_client);
+  stop_node(&s_server);
+}
+
+static void test_a_preshared_key_mismatch_never_completes_the_handshake(void) {
+  drive_preshared_key_mismatch(kPresharedKey, kPresharedKeyOther);
+  drive_preshared_key_mismatch(NULL, kPresharedKey);
+  drive_preshared_key_mismatch(kPresharedKey, NULL);
+}
+
+// The rekey thresholds use the protocol Keepalive-Timeout, not the configured
+// persistent keepalive: the initiator asks for a new session on data older
+// than Reject-After-Time - Keepalive-Timeout - Rekey-Timeout (165 s), the
+// responder on its own after Reject-After-Time - Keepalive-Timeout (170 s),
+// whatever interval each side was given. With the old code a 180 s keepalive
+// made the initiator rule never fire and a 120 s one made the responder rule
+// fire at 60 s.
+static void test_rekey_thresholds_do_not_follow_the_configured_keepalive(void) {
+  start_pair_ex(true, NULL, 180u, NULL, 120u);
+  (void)handshake_from(&s_client_address, kClientPort);
+  const uint32_t session_at = s_now_ms;
+  size_t first;
+
+  // 60 s old: neither side rekeys.
+  s_now_ms = session_at + 60u * 1000u;
+  const datagram_t data60 = sends_inner_packet(&s_server, 1u, 2u);
+  deliver(&s_client, &data60, &s_server_address, kServerPort);
+  first = s_sent_count;
+  service(&s_client);
+  TEST_ASSERT_EQUAL(0u, initiations_since(first));
+  first = s_sent_count;
+  service(&s_server);
+  TEST_ASSERT_EQUAL(0u, initiations_since(first));
+
+  // The initiator (client) rekeys on received data only from 165 s.
+  s_now_ms = session_at + 164u * 1000u;
+  const datagram_t data164 = sends_inner_packet(&s_server, 1u, 2u);
+  deliver(&s_client, &data164, &s_server_address, kServerPort);
+  first = s_sent_count;
+  service(&s_client);
+  TEST_ASSERT_EQUAL(0u, initiations_since(first));
+
+  s_now_ms = session_at + 165u * 1000u;
+  const datagram_t data165 = sends_inner_packet(&s_server, 1u, 2u);
+  deliver(&s_client, &data165, &s_server_address, kServerPort);
+  first = s_sent_count;
+  service(&s_client);
+  TEST_ASSERT_EQUAL(1u, initiations_since(first));
+
+  // The responder (server) rekeys from its timer only from 170 s.
+  s_now_ms = session_at + 169u * 1000u;
+  first = s_sent_count;
+  service(&s_server);
+  TEST_ASSERT_EQUAL(0u, initiations_since(first));
+
+  s_now_ms = session_at + 170u * 1000u;
+  first = s_sent_count;
+  service(&s_server);
+  TEST_ASSERT_EQUAL(1u, initiations_since(first));
+}
+
 // A 4-character block has at most two '=' and decodes to at least one byte.
 static void test_base64_rejects_a_block_with_three_padding_characters(void) {
   uint8_t out[4];
@@ -804,6 +923,9 @@ int main(void) {
   RUN_TEST(test_peer_resets_after_three_reject_after_times_without_a_session);
   RUN_TEST(test_peer_reset_keeps_a_learned_endpoint_without_a_configured_one);
   RUN_TEST(test_expired_previous_keypairs_are_destroyed);
+  RUN_TEST(test_peers_with_the_same_preshared_key_complete_the_handshake);
+  RUN_TEST(test_a_preshared_key_mismatch_never_completes_the_handshake);
+  RUN_TEST(test_rekey_thresholds_do_not_follow_the_configured_keepalive);
   RUN_TEST(test_base64_rejects_a_block_with_three_padding_characters);
   printf("protocol tests: %d run, %d failed\n", s_tests_run, s_tests_failed);
   return (s_tests_failed == 0) ? 0 : 1;

@@ -18,6 +18,8 @@
 #include <time.h>
 
 #include "wireguardif.h"
+#include "wireguard.h"
+#include "crypto.h"
 #include "wireguard-platform.h"
 #include "wireguard_timestamp.h"
 #include "wg_port_pico.h"
@@ -26,6 +28,18 @@ namespace {
 
 static_assert(WIREGUARD_TIMESTAMP_BYTES == WIREGUARDIF_TIMESTAMP_LEN,
               "the clock and the engine use the same TAI64N layout");
+// The engine reads 0xFFFF as "use the built-in interval" and a keepalive
+// longer than Reject-After-Time could not keep a session alive.
+static_assert(WIREGUARD_KEEPALIVE_MAX_SECONDS < WIREGUARDIF_KEEPALIVE_DEFAULT,
+              "the keepalive range must stay below the engine's default sentinel");
+static_assert(WIREGUARD_KEEPALIVE_MAX_SECONDS <= REJECT_AFTER_TIME,
+              "a keepalive longer than Reject-After-Time cannot keep a session alive");
+
+// Decoded preshared key on the stack, wiped when it goes out of scope.
+struct PresharedKey {
+    uint8_t bytes[WIREGUARD_SESSION_KEY_LEN] = {};
+    ~PresharedKey() { crypto_zero(bytes, sizeof(bytes)); }
+};
 
 // State of the single tunnel. On Arduino-Pico lwIP runs in a background IRQ,
 // so everything below is touched only with the lwIP context lock held
@@ -107,7 +121,9 @@ bool setup_locked(const ip4_addr_t &ipaddr,
                   const IPAddress &allowedIP,
                   const IPAddress &allowedMask,
                   bool route_all,
-                  const uint8_t (&now_tai64n)[WIREGUARDIF_TIMESTAMP_LEN]) {
+                  const uint8_t (&now_tai64n)[WIREGUARDIF_TIMESTAMP_LEN],
+                  const uint8_t *preshared_key,
+                  uint16_t keepalive_seconds) {
     // Capture the current default netif (Wi-Fi) so we can bind UDP traffic there.
     previous_default_netif = netif_default;
     if (previous_default_netif == nullptr) {
@@ -145,11 +161,12 @@ bool setup_locked(const ip4_addr_t &ipaddr,
     struct wireguardif_peer peer;
     memset(&peer, 0, sizeof(peer));
     peer.public_key = remotePeerPublicKey;
-    peer.preshared_key = nullptr;
+    peer.preshared_key = preshared_key;
     peer.allowed_ip = allowedIP;
     peer.allowed_mask = allowedMask;
     peer.endpoint_ip = endpoint4;
     peer.endport_port = remotePeerPort;
+    peer.keep_alive = keepalive_seconds; // 0 disables, never the engine's sentinel
     wireguard_timestamp_seed(&kept_timestamp, now_tai64n, remotePeerPublicKey, peer.greatest_timestamp);
 
     err_t err = wireguardif_add_peer(wg_netif, &peer, &peer_index);
@@ -181,12 +198,15 @@ bool WireGuard::begin(const IPAddress &localIP,
                      const char *privateKey,
                      const char *remotePeerAddress,
                      const char *remotePeerPublicKey,
-                     uint16_t remotePeerPort) {
+                     uint16_t remotePeerPort,
+                     const char *presharedKey,
+                     uint16_t persistentKeepaliveSeconds) {
     // Historical behavior: route everything via WireGuard.
     const IPAddress allowedIP(0, 0, 0, 0);
     const IPAddress allowedMask(0, 0, 0, 0);
     return beginAdvanced(localIP, privateKey, remotePeerAddress, remotePeerPublicKey,
-                         remotePeerPort, allowedIP, allowedMask);
+                         remotePeerPort, allowedIP, allowedMask, presharedKey,
+                         persistentKeepaliveSeconds);
 }
 
 bool WireGuard::beginAdvanced(const IPAddress &localIP,
@@ -195,12 +215,34 @@ bool WireGuard::beginAdvanced(const IPAddress &localIP,
                              const char *remotePeerPublicKey,
                              uint16_t remotePeerPort,
                              const IPAddress &allowedIP,
-                             const IPAddress &allowedMask) {
+                             const IPAddress &allowedMask,
+                             const char *presharedKey,
+                             uint16_t persistentKeepaliveSeconds) {
     if (_is_initialized) {
         return true;
     }
     if (privateKey == nullptr || remotePeerAddress == nullptr || remotePeerPublicKey == nullptr) {
         return false;
+    }
+    if (!wireguard_keepalive_seconds_valid(persistentKeepaliveSeconds)) {
+        log_e(TAG "persistent keepalive %u s is above %u s", (unsigned)persistentKeepaliveSeconds,
+              (unsigned)WIREGUARD_KEEPALIVE_MAX_SECONDS);
+        return false;
+    }
+
+    // The preshared key is optional. Text that is present has to decode to
+    // exactly 32 bytes; a key the server expects is never silently dropped.
+    // The engine copies the key; the stack copy is wiped on every return.
+    PresharedKey preshared_key;
+    const uint8_t *preshared_key_ptr = nullptr;
+    if (presharedKey != nullptr && presharedKey[0] != '\0') {
+        size_t decoded_len = sizeof(preshared_key.bytes);
+        if (!wireguard_base64_decode(presharedKey, preshared_key.bytes, &decoded_len) ||
+            decoded_len != sizeof(preshared_key.bytes)) {
+            log_e(TAG "preshared key is not the base64 text of 32 bytes");
+            return false;
+        }
+        preshared_key_ptr = preshared_key.bytes;
     }
 
     // The peer compares handshake timestamps, so the wall clock has to be set
@@ -243,7 +285,8 @@ bool WireGuard::beginAdvanced(const IPAddress &localIP,
     {
         LWIPMutex lock;
         if (!setup_locked(ipaddr, netmask, privateKey, remotePeerPublicKey, endpoint4,
-                          remotePeerPort, allowedIP, allowedMask, route_all, now_tai64n)) {
+                          remotePeerPort, allowedIP, allowedMask, route_all, now_tai64n,
+                          preshared_key_ptr, persistentKeepaliveSeconds)) {
             return false;
         }
     }

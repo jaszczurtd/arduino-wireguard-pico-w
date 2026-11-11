@@ -25,7 +25,8 @@ One Linux machine inside the WiFi LAN:
 ## Board side
 
 Copy `wg_services/secrets.h.example` to `wg_services/secrets.h`, fill in the
-WiFi credentials, the keys, the host address and port, build for
+WiFi credentials, the keys, the host address and port, the preshared key when
+the host expects one (`WG_PRESHARED_KEY`, empty otherwise), build for
 `rp2040:rp2040:rpipicow` (or `rpipico2w`) and watch the serial port at 115200.
 `-DSOAK_SECONDS=600` lengthens the soak (default 300 s, the keys renew every
 120 s), `-DWG_LOG_LEVEL=5` adds the library's packet trace.

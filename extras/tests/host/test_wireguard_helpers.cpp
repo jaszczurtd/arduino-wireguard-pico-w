@@ -16,6 +16,7 @@ extern "C" {
 #include "crypto.h"
 }
 #include "wireguard_allowed_ip.h"
+#include "wireguard_keepalive.h"
 #include "wireguard_pbuf.h"
 #include "wireguard_replay.h"
 #include "wireguard_timestamp.h"
@@ -325,6 +326,18 @@ static bool hex_to_bytes(const char *hex, uint8_t *out, size_t out_len) {
   return true;
 }
 
+// ---- persistent keepalive validation ---------------------------------------
+
+static void test_keepalive_seconds_range() {
+  CHECK(wireguard_keepalive_seconds_valid(0u));   // disabled
+  CHECK(wireguard_keepalive_seconds_valid(WIREGUARD_KEEPALIVE_DEFAULT_SECONDS));
+  CHECK(wireguard_keepalive_seconds_valid(WIREGUARD_KEEPALIVE_MAX_SECONDS));
+  CHECK(!wireguard_keepalive_seconds_valid(WIREGUARD_KEEPALIVE_MAX_SECONDS + 1u));
+  CHECK(!wireguard_keepalive_seconds_valid(65535u));
+  CHECK(WIREGUARD_KEEPALIVE_DEFAULT_SECONDS <= WIREGUARD_KEEPALIVE_MAX_SECONDS);
+  CHECK(WIREGUARD_KEEPALIVE_MAX_SECONDS == 180u);
+}
+
 static void test_crypto_zero_and_equal() {
   uint8_t secret[16];
   for (size_t i = 0; i < sizeof(secret); ++i) secret[i] = (uint8_t)(0xA0u + i);
@@ -417,6 +430,7 @@ int main() {
   mem_init();
   memp_init();
 
+  test_keepalive_seconds_range();
   test_crypto_zero_and_equal();
   test_blake2s_known_vector_for_abc();
   test_x25519_rfc7748_vectors();

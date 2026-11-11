@@ -357,8 +357,13 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 					keypair->last_rx = now;
 					peer->last_rx = now;
 
-					// Check to see if we should rekey
-					if (keypair->initiator && wireguard_expired(keypair->keypair_millis, REJECT_AFTER_TIME - peer->keepalive_interval - REKEY_TIMEOUT)) {
+					// 6.2 The initiator asks for a new session when it receives data on
+					// one older than Reject-After-Time - Keepalive-Timeout - Rekey-Timeout.
+					// Keepalive-Timeout is the protocol constant: the configured
+					// persistent keepalive must not change the rekey timing (an interval
+					// of 180 s would make this rule never fire and the responder rule
+					// below fire at once).
+					if (keypair->initiator && wireguard_expired(keypair->keypair_millis, REJECT_AFTER_TIME - KEEPALIVE_TIMEOUT - REKEY_TIMEOUT)) {
 						peer->send_handshake = true;
 					}
 
@@ -956,7 +961,7 @@ static bool should_send_initiation(struct wireguard_peer *peer) {
             log_d(TAG "  send_handshake flag is TRUE");
             result = true;
         } else if (peer->curr_keypair.valid && !peer->curr_keypair.initiator && 
-                   wireguard_expired(peer->curr_keypair.keypair_millis, REJECT_AFTER_TIME - peer->keepalive_interval)) {
+                   wireguard_expired(peer->curr_keypair.keypair_millis, REJECT_AFTER_TIME - KEEPALIVE_TIMEOUT)) {
             log_d(TAG "  curr_keypair expired");
             result = true;
         } else if (!peer->curr_keypair.valid && peer->active) {

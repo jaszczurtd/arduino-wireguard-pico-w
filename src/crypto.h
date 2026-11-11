@@ -5,6 +5,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // BLAKE2S IMPLEMENTATION
 #include "crypto/refc/blake2s.h"
 #define wireguard_blake2s_ctx blake2s_ctx
@@ -97,6 +101,10 @@
 
 void crypto_zero(void *dest, size_t len);
 bool crypto_equal(const void *a, const void *b, size_t size);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
 
 #endif /* _CRYPTO_H_ */
 

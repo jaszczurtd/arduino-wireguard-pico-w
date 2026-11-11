@@ -15,8 +15,7 @@
 #include "crypto.h"          // for U64TO8_BIG / U32TO8_BIG
 #include <sys/time.h>        // gettimeofday()
 
-#include "hardware/regs/rosc.h"
-#include "hardware/regs/addressmap.h"
+#include "pico/rand.h"
 
 static bool is_platform_initialized = false;
 
@@ -26,32 +25,23 @@ void wireguard_platform_init(void) {
   is_platform_initialized = true;
 }
 
-// Hardware RNG for Pico - Ring Oscillator
-static uint32_t get_hardware_random() {
-    uint32_t random = 0;
-    volatile uint32_t *rnd_reg = (uint32_t *)(ROSC_BASE + ROSC_RANDOMBIT_OFFSET);
-    
-    for (int i = 0; i < 32; i++) {
-        random <<= 1;
-        random |= (*rnd_reg) & 1;
-    }
-    
-    return random;
-}
-
+// Key material comes from pico_rand: ring oscillator bits, the microsecond
+// timer and a bus performance counter hashed into a seeded 128-bit PRNG, on
+// the RP2350 also the hardware TRNG. Raw ROSC bits alone are correlated. The
+// generator may be called from any core and from IRQ context; it can block
+// for a few microseconds while it gathers entropy.
 void wireguard_random_bytes(void *bytes, size_t size) {
     uint8_t *p = (uint8_t *)bytes;
-    uint32_t r;
-    
-    while (size >= 4) {
-        r = get_hardware_random();
-        memcpy(p, &r, 4);
-        p += 4;
-        size -= 4;
+
+    while (size >= 8) {
+        uint64_t r = get_rand_64();
+        memcpy(p, &r, 8);
+        p += 8;
+        size -= 8;
     }
-    
+
     if (size > 0) {
-        r = get_hardware_random();
+        uint64_t r = get_rand_64();
         memcpy(p, &r, size);
     }
 }
